@@ -1,0 +1,21 @@
+seed: 42
+
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  models_dir: models
+  submissions_dir: submissions
+
+columns:
+  id: ID
+  time: time
+  lat: lat
+  lon: lon
+  target: target
+  tws_masked_flag: TWS_t_masked
+  forbidden_features: [lat, lon, ID, sample_id]
+
+mlflow:
+  experiment_name: tws-forecasting
+  tracking_uri: file:./mlruns

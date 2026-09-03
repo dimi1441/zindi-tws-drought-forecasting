@@ -1,0 +1,17 @@
+pandas
+numpy
+scikit-learn
+lightgbm
+xgboost
+catboost
+pyarrow
+matplotlib
+shap
+codecarbon
+dvc
+mlflow
+hydra-core
+omegaconf
+pytest
+jupyter
+ipykernel
