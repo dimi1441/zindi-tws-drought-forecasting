@@ -34,3 +34,84 @@ Phase 1 — exploration (`notebooks/01_exploration.ipynb`) : mesurer empiriqueme
 distribution des horizons dans le test (essentiel pour la Phase 3, masquage augmenté),
 cartographier couverture spatiale et manquants, analyser saisonnalité et corrélations à
 différents lags.
+
+## 2026-09-04 — Phase 1 : exploration
+
+- `notebooks/01_exploration.ipynb` + `reports/data_understanding.md` produits et commités
+  (8 sections : chargement, stats descriptives, valeurs manquantes, horizon effectif,
+  couverture spatiale, saisonnalité, corrélations aux lags, synthèse), avec 7 figures dans
+  `reports/`.
+- Grille spatiale parfaitement stable entre train (2 154 021 lignes, 15 715 cellules, 138 mois
+  2002-05→2015-08) et test (280 961 lignes, mêmes 15 715 cellules, 18 mois non contigus
+  2015-09→2018-12). 1 157 cellules (7,4 %) ont une couverture temporelle incomplète en train —
+  à surveiller pour les splits de la Phase 4.
+- Pas de `NaN` explicite : le masquage de `TWS_t` (66,5 % des lignes test, conforme au brief)
+  se traduit par une valeur substituée signalée uniquement par `TWS_t_masked`. Règle actée :
+  ne jamais lire `TWS_t` en test sans vérifier ce booléen.
+- **Horizon effectif mesuré sans fuite** (uniquement à partir de `TWS_t_masked` et `time`,
+  jamais des valeurs de `TWS_t`), selon la formule du brief §2.4. Plage confirmée 1-7,
+  moyenne ≈ 2,71, distribution fortement décroissante (`{1: 94048, 2: 62576, 3: 46777,
+  4: 31076, 5: 15560, 6: 15479, 7: 15445}`). Cette distribution devra être reproduite telle
+  quelle par le masquage augmenté de la Phase 3 (voir correction du 2026-09-04 ci-dessous :
+  plusieurs épisodes de masquage par cellule, pas un cutoff unique).
+- Cycles saisonniers en opposition de phase entre hémisphères nord/sud (~6 mois de décalage)
+  → décision : la climatologie de la Phase 2 doit être calculée par cellule × mois calendaire,
+  jamais globalement.
+- Corrélations avec `target` : persistance pure `TWS_t` = 0,803 (confirme la pertinence de la
+  baseline naïve), décroissance progressive jusqu'à lag12 = 0,371 (encore informatif → justifie
+  une feature interannuelle `TWS_t − TWS_{t-12}`). Côté covariables, les fenêtres SPEI longues
+  (12, 6 mois) sont plus corrélées que les courtes (1 mois) — cohérent avec l'inertie
+  hydrologique du TWS.
+- Écart constaté par rapport au processus décrit au brief §8.2 : ce journal n'avait pas été mis
+  à jour à l'issue de la session Phase 1 (commit `ee9b6f0`) ; entrée ajoutée a posteriori le
+  même jour pour combler le trou avant d'enchaîner sur la Phase 2.
+
+## 2026-09-04 — Corrections sur la Phase 1 (masquage)
+
+En répondant à des questions de compréhension sur le starter notebook et le masquage, deux
+erreurs ont été trouvées dans les livrables Phase 1 et corrigées (notebook, rapport, mémoire
+projet) :
+
+- **`TWS_t` masqué = vrai `NaN`, pas une valeur substituée.** Le rapport affirmait à tort que le
+  masquage produisait une valeur numérique de remplacement. Vérifié directement sur
+  `data/raw/Test.csv` : 186 913 `NaN` sur `TWS_t`, exactement égal au nombre de lignes
+  `TWS_t_masked == True`. L'erreur se voyait déjà dans la propre sortie du notebook (tableau
+  `isna()` juste au-dessus de l'affirmation erronée) — non recoupée au moment de la rédaction.
+- **Le masquage n'est pas cumulatif (pas de cutoff unique et définitif par cellule).** Analyse
+  ajoutée dans `01_exploration.ipynb` §4 : 99,9 % des cellules (15 707 / 15 715) ont plusieurs
+  segments masqués distincts sur les 18 mois de test (en moyenne ~4 trous séparés, max 5), avec
+  retour à un `TWS_t` observé entre deux trous. Seules 8 cellules suivent le schéma « masqué une
+  fois, masqué pour toujours ». Conforme au brief §2.3 (« séquences de trous »).
+- Impact sur la Phase 3 : le masquage augmenté devra simuler **plusieurs épisodes de masquage
+  par cellule** (chacun cumulatif localement), pas un unique cutoff terminal — sous peine de
+  sous-représenter le pattern réel du test.
+- Notebook ré-exécuté de bout en bout après correction (`jupyter nbconvert --execute --inplace`)
+  pour garantir que les sorties affichées correspondent au code actuel.
+
+## 2026-09-04 — Affinement : le masquage suit les vraies interruptions de la mission GRACE
+
+Suite à une question sur la plausibilité historique des trous de données, analyse plus poussée
+dans `01_exploration.ipynb` §4, qui affine (sans l'invalider) la correction précédente :
+
+- **Le masquage opère par mois calendaire, pas par cellule indépendamment.** Le taux de masquage
+  par mois de test est quasi binaire : ~0 % ou 99,6-100 %, jamais intermédiaire. 12 des 18 mois
+  de test sont des mois "gap", 6 sont des mois "bons".
+- **Confirmation côté train** : 22 mois sur 160 possibles sont totalement absents des lignes du
+  train (pas `NaN`, la ligne n'existe pas). Ces mois coïncident avec des interruptions réelles et
+  documentées de GRACE (mise en service 2002-2003, puis gaps liés à la dégradation des batteries
+  à partir de 2011, de plus en plus fréquents). Le trou de 13 mois entre les deux derniers blocs
+  du test correspond à la vraie transition GRACE → GRACE-FO (fin 2017 → mi-2018).
+- **Décision pour la Phase 3** (remplace la recommandation précédente "plusieurs épisodes par
+  cellule") :
+  1. Masquer par **mois entier** (toutes les cellules d'un mois choisi, pas un tirage
+     indépendant par cellule) — reproduit le vrai mécanisme.
+  2. Calibrer la fréquence des gaps simulés sur les 22 mois absents du train, avec un taux
+     **croissant dans le temps** (rare avant 2011, fréquent après) plutôt qu'un taux constant.
+- Rapport et notebook mis à jour et ré-exécutés en conséquence.
+
+### Prochaine étape
+
+Phase 2 — pipeline de features (`src/features/`) : lags temporels (1, 3, 6, 12 mois),
+climatologie cellule/mois + anomalies, feature d'horizon explicite
+(`months_since_last_observed_tws`), voisinage spatial (3×3/5×5). Datasets enrichis versionnés
+DVC en Parquet, stage `feature_engineering` dans `dvc.yaml`.
