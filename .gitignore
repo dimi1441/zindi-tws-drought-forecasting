@@ -22,6 +22,7 @@ models/*
 # MLflow
 mlruns/
 mlartifacts/
+mlflow.db
 
 # CodeCarbon
 emissions.csv

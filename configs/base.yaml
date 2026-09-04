@@ -18,4 +18,4 @@ columns:
 
 mlflow:
   experiment_name: tws-forecasting
-  tracking_uri: file:./mlruns
+  tracking_uri: sqlite:///mlflow.db
