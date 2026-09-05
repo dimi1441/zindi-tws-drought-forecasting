@@ -222,3 +222,45 @@ et spatial (GroupKFold par cellule/bassin versant), métriques (MAE, RMSE, R²) 
 de persistance + fallback climatologie, tracking MLflow. C'est là que sera construite la
 première vraie boucle d'entraînement qui décidera comment exploiter le mécanisme de masquage
 dynamique de la Phase 3 (combien de tirages, ensemble ou non).
+
+## 2026-09-05 — Phase 4 : baseline et validation
+
+Implémenté en mode plan (deux allers-retours de clarification avec l'utilisateur avant codage :
+mécanique précise du découpage temporel `TimeSeriesSplit` vérifiée sur les vraies dates, et
+confirmation que les folds ne servent qu'à estimer la performance, jamais à limiter les données du
+modèle final).
+
+- `src/validation/splits.py` : `temporal_splits` (fenêtre expansive, `TimeSeriesSplit` sur les
+  mois réellement présents — vérifié : 5 folds de ~23 mois de validation chacun, de 2004-09 à
+  2015-08), `spatial_splits` (`GroupKFold` par blocs de 10°, vérifié 282 blocs non vides sur les
+  vraies données).
+- `src/validation/metrics.py` : MAE/RMSE/R² par fold + agrégation moyenne ± écart-type.
+- `src/validation/baselines.py` : persistance (`last_observed_tws` → fallback
+  `TWS_t_climatology_mean`, aucun entraînement) et GBR simple (reprend `make_model()` du starter
+  à l'identique, mêmes 8 features, pour comparaison directe avec la référence connue).
+- `src/validation/run_baselines.py` : un seul tirage de masquage (Phase 3, seed=42) appliqué
+  avant les splits — la validation voit donc un vrai mélange d'horizons, pas seulement
+  l'horizon 1 dégénéré du train non masqué. 4 runs MLflow (2 baselines × 2 schémas), détail par
+  fold exporté en CSV (`reports/fold_detail_*.csv`) et attaché comme artefact MLflow.
+- **Résultats sur données réelles** (train masqué, seed=42) :
+
+  | Baseline | Schéma | MAE moyen | RMSE moyen | R² moyen |
+  |---|---|---|---|---|
+  | Persistance+climato | temporel | 0,423 | 0,592 | 0,509 |
+  | GBR simple | temporel | 0,421 | 0,576 | 0,546 |
+  | Persistance+climato | spatial | 0,422 | 0,598 | 0,568 |
+  | GBR simple | spatial | 0,413 | 0,562 | 0,619 |
+
+  Cohérent avec la référence starter (MAE 0,429 non masqué) malgré une tâche plus dure (train
+  masqué) — le GBR bat systématiquement la persistance, et le schéma spatial est plus facile que
+  le temporel (interpoler spatialement vs extrapoler vers un futur jamais vu), un écart qui a du
+  sens plutôt qu'un signal de surapprentissage.
+- 11 nouveaux tests (`test_splits.py`, `test_metrics.py`, `test_baselines.py`), 29 au total, tous
+  verts.
+
+### Prochaine étape
+
+Phase 5 — modélisation itérative : itérations A à G du brief (features simples → lags → 
+climatologie/anomalies → voisinage spatial (Phase 5 aussi, différé depuis Phase 2) → masquage
+augmenté (décider ici combien de tirages/ensemble, question laissée ouverte en Phase 3-4) →
+covariables externes → autres modèles). SHAP et CodeCarbon dès qu'un modèle mérite analyse.
