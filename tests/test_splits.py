@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from src.validation.splits import spatial_splits, temporal_splits
+from src.validation.splits import spatial_holdout, spatial_splits, temporal_holdout, temporal_splits
 
 
 def _synthetic_temporal_df(n_months: int = 24) -> pd.DataFrame:
@@ -58,3 +58,18 @@ def test_spatial_splits_train_and_val_disjoint_and_cover_everything():
     for train_mask, val_mask in spatial_splits(df, n_splits=2, block_size_degrees=10):
         assert not np.any(train_mask & val_mask)
         assert np.all(train_mask | val_mask)
+
+
+def test_temporal_holdout_val_is_strictly_after_train():
+    df = _synthetic_temporal_df()
+    train_mask, val_mask = temporal_holdout(df, val_fraction=0.2)
+    assert not np.any(train_mask & val_mask)
+    assert df.loc[train_mask, "time"].max() < df.loc[val_mask, "time"].min()
+
+
+def test_spatial_holdout_never_splits_a_block_and_is_disjoint():
+    df = _synthetic_spatial_df()
+    block_id = (df["lat"] // 10).astype(int).astype(str) + "_" + (df["lon"] // 10).astype(int).astype(str)
+    train_mask, val_mask = spatial_holdout(df, val_fraction=0.5, block_size_degrees=10)
+    assert not np.any(train_mask & val_mask)
+    assert not (set(block_id[train_mask]) & set(block_id[val_mask]))

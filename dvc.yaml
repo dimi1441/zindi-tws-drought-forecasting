@@ -12,3 +12,18 @@ stages:
       - data/processed/test_features.parquet
       - configs/feature_columns.yaml:
           cache: false
+
+  generate_submission:
+    cmd: python -m src.generate_submission
+    deps:
+      - data/raw/Train.csv
+      - data/raw/Test.csv
+      - src/features
+      - src/validation/baselines.py
+      - src/validation/splits.py
+      - src/generate_submission.py
+      - configs/features.yaml
+      - configs/base.yaml
+      - configs/feature_columns.yaml
+    outs:
+      - submissions/submission.csv

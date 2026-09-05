@@ -264,3 +264,120 @@ Phase 5 — modélisation itérative : itérations A à G du brief (features sim
 climatologie/anomalies → voisinage spatial (Phase 5 aussi, différé depuis Phase 2) → masquage
 augmenté (décider ici combien de tirages/ensemble, question laissée ouverte en Phase 3-4) →
 covariables externes → autres modèles). SHAP et CodeCarbon dès qu'un modèle mérite analyse.
+
+## 2026-09-05 — Phase 5, itération B+C : lags + climatologie + horizon
+
+Scope choisi avec l'utilisateur parmi plusieurs options (voisinage spatial, ensemble de
+masquage, ceci) : réutiliser le harnais de la Phase 4 tel quel, juste en remplaçant les 8
+features simples du GBR par les 33 features déjà calculées en Phase 2 (`configs/
+feature_columns.yaml`) — mesure directe du gain des lags/climatologie/horizon sans construire de
+nouveau module.
+
+- `src/validation/baselines.py` généralisé : `fit_predict_gbr(fit_df, val_df, feature_columns)`
+  accepte n'importe quel jeu de features ; `fit_predict_simple_gbr` devient un cas particulier
+  (garde le comportement/la signature d'avant, aucune régression sur les tests existants).
+- `run_baselines.py` ajoute une 3e baseline `full_features_gbr` (mêmes hyperparamètres GBR,
+  toutes les features Phase 2/3) à côté des 2 existantes, sur les mêmes 2 schémas de split.
+- **Résultat sur données réelles** (même tirage de masquage seed=42) :
+
+  | Baseline | Temporel (MAE / R²) | Spatial (MAE / R²) |
+  |---|---|---|
+  | Persistance+climato | 0,423 / 0,509 | 0,422 / 0,568 |
+  | GBR simple (8 features) | 0,421 / 0,546 | 0,413 / 0,619 |
+  | **GBR toutes features (33)** | **0,384 / 0,623** | **0,366 / 0,694** |
+
+  Gain net et cohérent dans les deux schémas : **-9 % de MAE** (temporel) et **-11 %** (spatial)
+  par rapport au GBR simple, R² en hausse de ~0,55→0,62 et ~0,62→0,69. Confirme que les lags,
+  la climatologie et l'horizon (Phase 2/3) apportent une valeur réelle, pas seulement pour la
+  cohérence anti-leakage mais pour la performance mesurée.
+- 6 runs MLflow au total maintenant dans l'expérience `tws-forecasting` (3 baselines × 2
+  schémas). Suite de tests inchangée (29 tests, tous verts).
+
+### Prochaine étape
+
+Phase 5 restante : voisinage spatial (itération D, le "levier majeur" du brief, toujours pas
+implémenté), décision sur le nombre de tirages de masquage/ensemble (itération E), covariables
+externes ERA5 si autorisation clarifiée (itération F), autres modèles (CatBoost/XGBoost,
+itération G).
+
+## 2026-09-05 — Phase 5 (suite) : LightGBM + early stopping calé sur nos folds
+
+Question de l'utilisateur : le GBR actuel (`HistGradientBoostingRegressor`, `max_iter=300` fixe)
+fait-il de l'early stopping ? Vérifié : `early_stopping="auto"` est le défaut sklearn (actif dès
+que le train dépasse 10 000 lignes), mais il pioche un tirage **aléatoire** de 10 % de `fit_df`
+pour sa validation interne — sans respecter la chronologie ni les blocs spatiaux. Testé sur le
+dernier fold temporel : `n_iter_ = 300 = max_iter`, l'early stopping ne s'est jamais déclenché
+(le modèle n'a peut-être pas fini de converger à 300 itérations).
+
+- Ajout de `src/validation/splits.py::temporal_holdout`/`spatial_holdout` : découpe interne
+  *one-shot* de `fit_df` (jamais `val_df`, qui resterait sinon utilisé à la fois pour arrêter
+  l'entraînement et pour rapporter la métrique — biais optimiste). `temporal_holdout` réserve la
+  dernière tranche de mois de `fit_df` ; `spatial_holdout` tire au sort une fraction des blocs de
+  10°. Chacun branché sur le schéma de validation externe correspondant
+  (`INNER_HOLDOUT_BY_SCHEME`).
+- `baselines.py::fit_predict_lightgbm_early_stopping` : LightGBM (déjà dans
+  `requirements.txt`, recommandé en premier par le brief §7.4 — plus que `HistGBR`, qui n'était
+  qu'un choix de convenance du starter), jusqu'à 3000 itérations, arrêt anticipé après 50 rounds
+  sans amélioration sur la validation interne. Mêmes hyperparamètres (max_depth, min_samples,
+  L2) que le GBR pour isoler l'effet du changement.
+- **Résultat sur données réelles** (même tirage de masquage seed=42) :
+
+  | Modèle | Temporel (MAE / R²) | Spatial (MAE / R²) |
+  |---|---|---|
+  | GBR (300 itérations fixes) | 0,3838 / 0,623 | 0,3660 / 0,694 |
+  | **LightGBM + early stopping** | 0,3836 / 0,623 (quasi identique) | **0,3492 / 0,720** (-4,7 % MAE) |
+
+  Gain **dépendant du schéma** : en temporel, aucune différence réelle (300 itérations
+  suffisaient déjà) ; en spatial, gain net. LightGBM+early-stopping ne fait jamais moins bien que
+  le GBR fixe, et parfois nettement mieux — bon candidat pour devenir le modèle par défaut des
+  prochaines itérations.
+- **Ajout suite à une question de l'utilisateur** ("le temps d'entraînement est-il loggué ?") :
+  non, seulement de façon implicite (MLflow enregistre `start_time`/`end_time` de chaque run,
+  mais rien d'explicite, rien par fold). Ajouté `fit_predict_seconds` par fold (colonne dans
+  `reports/fold_detail_*.csv`) + `fit_predict_seconds_total`/`_mean` en métriques MLflow. Pas un
+  vrai suivi d'empreinte carbone (CodeCarbon, toujours prévu pour plus tard, brief §6.4), mais un
+  point de comparaison chiffré en attendant.
+- 4 nouveaux tests (`test_fit_predict_lightgbm_early_stopping_runs_and_never_trains_on_val_df`,
+  `test_temporal_holdout_val_is_strictly_after_train`,
+  `test_spatial_holdout_never_splits_a_block_and_is_disjoint`, + 1), 32 au total, tous verts.
+- 8 runs MLflow au total dans `tws-forecasting` (4 baselines × 2 schémas).
+
+## 2026-09-05 — Saut anticipé en Phase 7 : première soumission
+
+Décision de l'utilisateur : sauter directement à la Phase 7 (soumission), revenir aux Phases 5
+(reste des itérations, dont un modèle itératif LSTM/TCN) et 6 (analyse d'erreurs) plus tard.
+
+- Discussion importante avant de coder : l'utilisateur a fait remarquer qu'un GBM (arbres) n'a
+  pas de notion d'"époque" contrairement à un réseau de neurones — entraîner plusieurs modèles
+  sur des tirages de masquage différents et moyenner leurs prédictions serait du **bagging**, pas
+  "le masquage dynamique par époque" prévu au brief (§5), qui suppose un modèle itératif. Décision
+  finale : **pas de bagging**, un seul tirage de masquage (seed=42, même seed que
+  `run_baselines.py` pour rester comparable), LightGBM+early-stopping (déjà validé meilleur en
+  Phase 5). Le vrai mécanisme dynamique par époque attendra un modèle itératif, en Phase 5.
+- `src/generate_submission.py` (nouveau) : réutilise tel quel `build_features(...,
+  masking_config, rng)` et `fit_predict_lightgbm_early_stopping(train_df, test_df,
+  feature_columns, temporal_holdout, return_model=True)` — aucun nouveau mécanisme de
+  modélisation, uniquement de l'orchestration. `return_model=True` ajouté à
+  `fit_predict_lightgbm_early_stopping` (paramètre optionnel, défaut `False`, aucune régression)
+  pour récupérer `model.booster_.best_iteration` à des fins de traçabilité.
+- Bug corrigé en cours de route : `model.booster_.best_iteration_` (avec underscore final,
+  convention scikit-learn) n'existe pas sur l'objet `Booster` de LightGBM — c'est
+  `best_iteration` (sans underscore). Corrigé dans le script et la docstring.
+- **Résultat** : `submissions/submission.csv` généré (280 961 lignes, colonnes `ID`/`Target`,
+  même ordre d'IDs que `SampleSubmission.csv`, aucun NaN, jamais tout à zéro,
+  `Target` ∈ [-2,09 ; 2,18], moyenne -0,11, écart-type 0,65 — cohérent avec l'échelle standardisée
+  de `TWS_t` observée depuis la Phase 1). `best_iteration` LightGBM = 70 (sur ce tirage précis,
+  arrêt bien avant la limite de 3000).
+- Run MLflow `final_submission` loggué (seed, nb lignes train/test, `best_iteration`,
+  `submission.csv` en artefact). Nouveau stage `dvc.yaml: generate_submission` (déterministe à
+  seed fixée — `random_state=42` dans LightGBM).
+- **Rappel explicite pour la suite** : cette soumission n'utilise ni le voisinage spatial
+  (itération D, toujours différée), ni les covariables externes (itération F), ni un modèle
+  itératif (itération G) — c'est un premier jalon déposable, pas la version finale. Priorité
+  performance d'abord (règle #9 du brief) : à améliorer en revenant sur les Phases 5/6.
+
+### Prochaine étape
+
+Retour aux Phases 5/6 comme convenu : voisinage spatial (itération D), analyse d'erreurs par
+horizon/zone/saison (Phase 6), puis modèle itératif LSTM/TCN (occasion d'exercer le vrai
+masquage dynamique par époque, jamais encore testé faute de modèle adapté).

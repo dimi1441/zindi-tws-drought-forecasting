@@ -37,3 +37,48 @@ stages:
       hash: md5
       md5: 570e3483036550253cb84af59ca02096
       size: 519670491
+  generate_submission:
+    cmd: python -m src.generate_submission
+    deps:
+    - path: configs/base.yaml
+      hash: md5
+      md5: 054e9c9a2b047faec3519960ea83b8e3
+      size: 380
+    - path: configs/feature_columns.yaml
+      hash: md5
+      md5: 08fb8e76bc9b0b738a52e098932c8702
+      size: 609
+    - path: configs/features.yaml
+      hash: md5
+      md5: e108130486310878898d5dd1b86f60a8
+      size: 739
+    - path: data/raw/Test.csv
+      hash: md5
+      md5: acc9eb8198f07a01e3737a81d6667f6b
+      size: 34365988
+    - path: data/raw/Train.csv
+      hash: md5
+      md5: 0289cf45af0ceeb0f5a2dc32fda09785
+      size: 289126551
+    - path: src/features
+      hash: md5
+      md5: 62992e181660c2d1f81a7b0ea378bd4b.dir
+      size: 32723
+      nfiles: 16
+    - path: src/generate_submission.py
+      hash: md5
+      md5: 2d175e5b9badeb582d178e79bcb5aefe
+      size: 3245
+    - path: src/validation/baselines.py
+      hash: md5
+      md5: 1de5a1e52b8599c1d3f02f7f73f0fc95
+      size: 5012
+    - path: src/validation/splits.py
+      hash: md5
+      md5: eff8a28c4f07aead8c8b4635758b19a2
+      size: 4054
+    outs:
+    - path: submissions/submission.csv
+      hash: md5
+      md5: 42f2ea83c4eca07c2bb3cd02008d1618
+      size: 11411678
