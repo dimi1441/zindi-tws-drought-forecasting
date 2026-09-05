@@ -1,0 +1,14 @@
+stages:
+  feature_engineering:
+    cmd: python -m src.features.pipeline
+    deps:
+      - data/raw/Train.csv
+      - data/raw/Test.csv
+      - src/features
+      - configs/features.yaml
+      - configs/base.yaml
+    outs:
+      - data/processed/train_features.parquet
+      - data/processed/test_features.parquet
+      - configs/feature_columns.yaml:
+          cache: false

@@ -1,0 +1,5 @@
+lags:
+  tws: [1, 3, 6, 12]
+  covariates: [1, 3]
+
+rolling_windows: [3, 6, 12]

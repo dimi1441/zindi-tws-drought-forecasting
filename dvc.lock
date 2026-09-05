@@ -1,0 +1,39 @@
+schema: '2.0'
+stages:
+  feature_engineering:
+    cmd: python -m src.features.pipeline
+    deps:
+    - path: configs/base.yaml
+      hash: md5
+      md5: 054e9c9a2b047faec3519960ea83b8e3
+      size: 380
+    - path: configs/features.yaml
+      hash: md5
+      md5: db9125c044846699405930835cda5d54
+      size: 77
+    - path: data/raw/Test.csv
+      hash: md5
+      md5: acc9eb8198f07a01e3737a81d6667f6b
+      size: 34365988
+    - path: data/raw/Train.csv
+      hash: md5
+      md5: 0289cf45af0ceeb0f5a2dc32fda09785
+      size: 289126551
+    - path: src/features
+      hash: md5
+      md5: f7dc4e869d2d52f842b70324ce560717.dir
+      size: 25079
+      nfiles: 14
+    outs:
+    - path: configs/feature_columns.yaml
+      hash: md5
+      md5: 08fb8e76bc9b0b738a52e098932c8702
+      size: 609
+    - path: data/processed/test_features.parquet
+      hash: md5
+      md5: f6ff55a3ebc5a77522f863039665fdeb
+      size: 57621453
+    - path: data/processed/train_features.parquet
+      hash: md5
+      md5: 570e3483036550253cb84af59ca02096
+      size: 519670491

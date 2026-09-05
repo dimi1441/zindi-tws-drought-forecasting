@@ -115,3 +115,48 @@ Phase 2 — pipeline de features (`src/features/`) : lags temporels (1, 3, 6, 12
 climatologie cellule/mois + anomalies, feature d'horizon explicite
 (`months_since_last_observed_tws`), voisinage spatial (3×3/5×5). Datasets enrichis versionnés
 DVC en Parquet, stage `feature_engineering` dans `dvc.yaml`.
+
+## 2026-09-05 — Phase 2 : pipeline de features
+
+Implémenté en mode plan (validé par l'utilisateur avant codage) : `src/features/io.py`,
+`temporal_lags.py`, `seasonal.py`, `target_month_encoding.py`, `horizon_features.py`,
+`pipeline.py` + `configs/features.yaml`, `dvc.yaml` (nouveau, stage `feature_engineering`),
+`tests/` (11 tests, tous passants), ADR `docs/decisions/0002-feature-pipeline-leakage-safety.md`.
+
+- **Voisinage spatial retiré de cette phase**, reporté à la Phase 5 itération D (décision de
+  l'utilisateur en cours de conception) — le brief prévoit déjà cette itération séparément de la
+  baseline, donc ce n'est pas une perte, juste un séquencement "commencer simple, itérer" (§4.3).
+- **Panel combiné train+test** (`io.build_cell_timeline`) : toutes les features temporelles
+  regardent l'historique réel d'une cellule sur train ET test (mêmes 15 715 cellules), pas
+  seulement les 18 mois épars du test — sans ça les lags de test auraient été en grande partie
+  faux/trous. Détail dans l'ADR 0002.
+- **Climatologie causale par construction** (`expanding().mean().shift(1)` par cellule × mois
+  calendaire) plutôt que "recalculée fold par fold" : plus stricte, ne peut pas fuiter même sans
+  machinerie de fold. Vérifié que `pandas.expanding().mean()` ignore nativement les `NaN` (mois
+  absents ou masqués) sans les propager — pas de code spécial nécessaire, testé dans
+  `tests/test_seasonal.py`.
+- **Horizon vectorisé** (`.where(~masked)` + `.groupby(cellule).ffill()`) en remplacement de la
+  boucle Python du notebook Phase 1 — testé en régression contre la distribution déjà validée à
+  la main (`{1: 94048, ..., 7: 15445}`), résultat identique.
+- **Feature ajoutée par rapport au brief** : `last_observed_tws` (pas seulement le compte de mois
+  écoulés `months_since_last_observed_tws`, mais aussi la dernière vraie valeur connue) — permet
+  une persistance depuis le dernier point connu plutôt que l'imputation par constante globale du
+  starter des organisateurs.
+- Correction en cours de route : `pd.concat` avec une colonne `target` toute-`NaN` sur test
+  déclenchait un `FutureWarning` pandas (dtype inference dépréciée) — corrigé en utilisant
+  `float("nan")` au lieu de `pd.NA`.
+- `configs/feature_columns.yaml` marqué `cache: false` dans `dvc.yaml` (contrairement aux deux
+  Parquet) pour rester un fichier Git normal, lisible en diff — utile pour suivre l'évolution des
+  features dans le temps.
+- Résultats : `train_features.parquet` (2 154 021 × 39), `test_features.parquet` (280 961 × 38),
+  33 colonnes dans `feature_columns.yaml` (aucune de `lat`, `lon`, `ID`, `sample_id`).
+  `dvc repro feature_engineering` reproductible depuis un état propre.
+
+### Prochaine étape
+
+Phase 3 — masquage augmenté (`src/features/mask_augmentation.py`) : simuler sur le train les
+trous réels de la mission GRACE identifiés en Phase 1 (masquage par mois entier, pas par
+cellule indépendamment ; fréquence croissante dans le temps, calibrée sur les 22 mois absents du
+train). Une fois le train augmenté, réappliquer `horizon_features.add_horizon_features` dessus
+(même fonction, juste un nom de colonne de masquage différent) pour obtenir une vraie
+distribution d'horizons côté train, cohérente avec celle du test.
