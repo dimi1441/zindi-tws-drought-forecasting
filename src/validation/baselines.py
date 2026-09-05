@@ -74,6 +74,24 @@ def fit_predict_simple_gbr(fit_df: pd.DataFrame, val_df: pd.DataFrame) -> np.nda
     return fit_predict_gbr(fit_df, val_df, SIMPLE_FEATURES)
 
 
+def fit_predict_bagged_gbr(
+    fit_dfs: list[pd.DataFrame], val_dfs: list[pd.DataFrame], feature_columns: list[str]
+) -> np.ndarray:
+    """Bagging (Phase 5, demande utilisateur explicite du 2026-09-05) : moyenne des prédictions
+    de plusieurs `make_gbr_pipeline()` (mêmes hyperparamètres que le starter, `random_state=42`
+    fixe sur chaque membre — la diversité vient du masquage augmenté, pas du hasard interne du
+    modèle, pour isoler l'effet mesuré). `fit_dfs`/`val_dfs` : une paire par tirage de masquage
+    (même lignes/mêmes mois pour tous les tirages, seules `TWS_t` et les features dérivées
+    diffèrent) — construites par l'appelant en appliquant le même masque fit/val à chaque
+    `build_features(..., rng=seed_i)`.
+    """
+    predictions = [
+        fit_predict_gbr(fit_df, val_df, feature_columns)
+        for fit_df, val_df in zip(fit_dfs, val_dfs)
+    ]
+    return np.mean(predictions, axis=0)
+
+
 def fit_predict_lightgbm_early_stopping(
     fit_df: pd.DataFrame,
     val_df: pd.DataFrame,

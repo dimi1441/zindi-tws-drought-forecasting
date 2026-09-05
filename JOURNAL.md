@@ -381,3 +381,62 @@ Décision de l'utilisateur : sauter directement à la Phase 7 (soumission), reve
 Retour aux Phases 5/6 comme convenu : voisinage spatial (itération D), analyse d'erreurs par
 horizon/zone/saison (Phase 6), puis modèle itératif LSTM/TCN (occasion d'exercer le vrai
 masquage dynamique par époque, jamais encore testé faute de modèle adapté).
+
+## 2026-09-05 — Bagging de GBR sur tirages de masquage différents (demande explicite utilisateur)
+
+Contrairement au bagging évoqué puis écarté lors du saut en Phase 7 (qui visait à simuler le
+"masquage dynamique par époque" du brief — jugé inadapté à un GBM sans notion d'époque),
+l'utilisateur redemande ici du bagging pour lui-même, comme technique de réduction de variance
+indépendante de cette question : plusieurs `HistGradientBoostingRegressor` (réplique exacte de
+`make_gbr_pipeline()`), chacun entraîné sur 100 % du train mais avec un tirage de masquage
+augmenté différent (mécanisme dynamique de la Phase 3, un `rng` différent par membre), prédictions
+moyennées. Demande explicite : GBR uniquement (pas de mix avec LightGBM), seeds fixées avec soin
+pour la reproductibilité.
+
+- Clarifié avec l'utilisateur avant codage (`AskUserQuestion`) : 3 modèles, tous GBR (pas de mix
+  LightGBM/GBR contrairement à l'idée initiale), seeds explicites **42/43/44** (42 = même premier
+  tirage que `run_baselines.py`/l'ancienne soumission, pour rester comparable). Pas de bootstrap
+  des lignes en plus — la seule source de diversité entre membres est le tirage de masquage
+  (mois de trous différents), pas un sous-échantillonnage aléatoire des lignes.
+- `src/validation/baselines.py::fit_predict_bagged_gbr` : moyenne les prédictions de N
+  `fit_predict_gbr` déjà existants, chacun recevant une paire `(fit_df, val_df)` propre à son
+  tirage de masquage — construites par l'appelant en appliquant le même masque
+  temporel/spatial à chacun des N `train_df` obtenus via `build_features(..., rng=seed_i)` (les
+  lignes/mois sont identiques quel que soit le tirage, seule `TWS_t` et les features dérivées
+  diffèrent, donc les masques booléens de split se réutilisent tels quels).
+- `src/validation/run_bagging.py` (nouveau) : reproduit le harnais de `run_baselines.py`
+  (`temporal_splits`/`spatial_splits`, 5 folds chacun) pour rester directement comparable aux
+  baselines déjà loggées.
+- **Résultat sur données réelles** (seeds 42/43/44) :
+
+  | Modèle | Temporel (MAE / R²) | Spatial (MAE / R²) |
+  |---|---|---|
+  | GBR simple, un seul tirage (33 features) | 0,384 / 0,623 | 0,366 / 0,694 |
+  | LightGBM + early stopping, un seul tirage | 0,384 / 0,623 | 0,349 / 0,720 |
+  | **Bagging 3×GBR (seeds 42/43/44)** | **0,372 ± 0,035 / 0,648** | **0,360 ± 0,016 / 0,704** |
+
+  Le bagging bat le GBR seul sur les deux schémas (-3 % MAE temporel, -2 % spatial) et bat
+  LightGBM en temporel, mais reste derrière LightGBM en spatial (0,360 contre 0,349) — le
+  bagging de GBR n'est donc pas strictement le meilleur choix sur toute la ligne, mais reste un
+  gain net par rapport au GBR simple. Piste ouverte pour une prochaine itération : appliquer le
+  même bagging à LightGBM plutôt qu'au GBR, pour cumuler les deux gains.
+- `src/generate_submission.py` réécrit pour utiliser ce bagging (3 GBR, seeds 42/43/44,
+  réentraînés sur 100 % du train comme toujours pour la soumission finale) au lieu du LightGBM
+  mono-tirage de la Phase 7. `submissions/submission.csv` régénéré (280 961 lignes, aucun NaN,
+  aucun zéro, `Target` ∈ [-2,35 ; 2,34] — cohérent avec l'échelle standardisée de `TWS_t`).
+- 1 nouveau test (`test_fit_predict_bagged_gbr_averages_individual_member_predictions`, vérifie
+  que le bagging renvoie exactement la moyenne arithmétique des prédictions individuelles), 34 au
+  total, tous verts.
+- `dvc status` avait détecté le changement de deps (`baselines.py`, `generate_submission.py`) et
+  de sortie (`submissions/submission.csv`) ; `dvc commit generate_submission -f` utilisé pour
+  enregistrer l'état déjà produit et vérifié (plutôt que de relancer `dvc repro`, redondant vu que
+  le script venait d'être exécuté avec les mêmes seeds) — `dvc status` confirme "Data and
+  pipelines are up to date." ensuite. `dvc push` à faire dans la foulée de ce commit (règle
+  `CLAUDE.md`).
+
+### Prochaine étape
+
+Toujours en attente (inchangé depuis la Phase 7) : voisinage spatial (itération D), analyse
+d'erreurs (Phase 6), covariables externes (itération F), modèle itératif (itération G). Nouvelle
+piste identifiée ce jour : bagging appliqué à LightGBM (au lieu du GBR) pour cumuler le gain du
+bagging et celui déjà mesuré de LightGBM+early-stopping en spatial.

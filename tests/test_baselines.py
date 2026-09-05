@@ -5,6 +5,8 @@ import pandas as pd
 
 from src.validation.baselines import (
     SIMPLE_FEATURES,
+    fit_predict_bagged_gbr,
+    fit_predict_gbr,
     fit_predict_lightgbm_early_stopping,
     fit_predict_simple_gbr,
     predict_persistence_climatology,
@@ -53,3 +55,20 @@ def test_fit_predict_lightgbm_early_stopping_runs_and_never_trains_on_val_df():
     assert y_pred.shape == (len(val_df),)
     mae = np.abs(y_pred - val_df["target"].to_numpy()).mean()
     assert mae < 0.5
+
+
+def test_fit_predict_bagged_gbr_averages_individual_member_predictions():
+    # Deux tirages "de masquage" différents simulés par deux jeux fit/val distincts (mêmes
+    # colonnes, valeurs différentes) : le bag doit renvoyer exactement la moyenne des deux GBR
+    # entraînés séparément avec les mêmes hyperparamètres (make_gbr_pipeline, random_state=42 fixe).
+    fit_df_a, val_df_a = _synthetic_fit_val(n=200, n_months=20)
+    fit_df_b, val_df_b = _synthetic_fit_val(n=200, n_months=20)
+
+    bagged_pred = fit_predict_bagged_gbr(
+        [fit_df_a, fit_df_b], [val_df_a, val_df_b], SIMPLE_FEATURES
+    )
+    pred_a = fit_predict_gbr(fit_df_a, val_df_a, SIMPLE_FEATURES)
+    pred_b = fit_predict_gbr(fit_df_b, val_df_b, SIMPLE_FEATURES)
+
+    assert bagged_pred.shape == (len(val_df_a),)
+    np.testing.assert_allclose(bagged_pred, (pred_a + pred_b) / 2)
