@@ -165,9 +165,29 @@ Position officielle des organisateurs (confirmée le 19 août dans le chat du ch
 
 1. **Feature explicite d'horizon** (`months_since_last_observed_tws`).
 2. **Masquage augmenté à l'entraînement** :
-   - À chaque itération (ou une fois si masquage fixe), pour chaque ligne d'entraînement, tirer aléatoirement N (nombre de mois récents à masquer) selon la **distribution empirique observée en test**.
-   - Le masquage est **cumulatif** : on masque toujours les N mois les plus récents, pas des mois isolés.
-   - Distribution à mesurer d'abord sur le test (utilisation de `TWS_t_masked` uniquement, pas des valeurs — pas de leakage).
+   - **Correction (2026-09-05, Phase 3)** : le masquage réel n'est **pas** indépendant par
+     cellule. Mesuré sur le test (Phase 1) : le taux de masquage par mois est quasi binaire
+     (~0 % ou ~99,6-100 %, jamais intermédiaire), et confirmé par les 22 mois du train totalement
+     absents (pas masqués — la ligne n'existe pas), qui coïncident avec des pannes GRACE
+     documentées (dégradation des batteries à partir de 2011, transition GRACE→GRACE-FO fin
+     2017-2018). Le masquage augmenté doit donc couper des **mois calendaires entiers pour
+     (quasi) toutes les cellules à la fois**, jamais cellule par cellule indépendamment — sinon
+     un modèle apprendrait une béquille ("mes voisins ont des données même quand je n'en ai pas")
+     qui n'existe jamais en réalité et qui deviendrait trompeuse dès que des features de
+     voisinage spatial seraient ajoutées.
+   - **Mode dynamique uniquement** : le masque n'est jamais figé sur disque, il est retiré à
+     chaque appel (nouvel ensemble de mois masqués à chaque tirage) — un entraînement exposé à
+     plusieurs tirages différents (ensemble de modèles, ou callback d'époque pour un modèle
+     itératif) généralise mieux qu'un masque unique figé une fois pour toutes.
+   - Fréquence calibrée sur la forme historique (croissante dans le temps, concentrée après 2011)
+     mais rapprochée du régime, plus dur, observé en test — voir
+     `docs/decisions/0003-augmented-masking-mechanism.md` et
+     `configs/features.yaml: masking.target_gap_rate_by_period`.
+   - Distribution cible mesurée sur le test (utilisation de `TWS_t_masked` uniquement, pas des
+     valeurs — pas de leakage) : `{1: 94048, 2: 62576, 3: 46777, 4: 31076, 5: 15560, 6: 15479,
+     7: 15445}` (voir `reports/data_understanding.md`). L'histogramme résultant du masquage par
+     mois entier ne la reproduit pas exactement (effet émergent, pas contrôlé ligne à ligne) —
+     accepté comme point de départ à affiner en Phase 5 (itération E).
 
 ### 4.3 Choix du modèle
 
@@ -225,12 +245,16 @@ Rapporter : moyenne ± écart-type sur les folds. L'écart entre les deux schém
 - Datasets enrichis → `data/processed/` (format Parquet, versionnés DVC).
 - `dvc.yaml` avec stage `feature_engineering`.
 
-### Phase 3 — Masquage augmenté (1-2 jours)
+### Phase 3 — Masquage augmenté (1-2 jours) — fait le 2026-09-05
 
-- `src/features/mask_augmentation.py` :
-  - Mode statique (masquage fixe, une fois pour toutes).
-  - Mode dynamique (retiré à chaque époque, pour modèles itératifs).
-- Distribution cible sauvegardée dans `configs/`.
+- `src/features/mask_augmentation.py` : **mode dynamique uniquement** (décision du 2026-09-05,
+  voir `docs/decisions/0003-augmented-masking-mechanism.md`) — pas de version statique figée sur
+  disque, le masque (mois calendaires entiers, pas par cellule) est retiré à chaque appel via
+  `pipeline.build_features(..., masking_config, rng)`. La boucle multi-tirages (ensemble de
+  modèles ou callback d'époque) est laissée à la Phase 4/5.
+- Distribution cible (mesurée sur le test en Phase 1) documentée dans `reports/data_understanding.md`
+  et rappelée en §4.2 ci-dessus ; fréquence de masquage configurée dans
+  `configs/features.yaml: masking.target_gap_rate_by_period`.
 
 ### Phase 4 — Baseline et validation (2 jours)
 

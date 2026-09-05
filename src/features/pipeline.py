@@ -9,6 +9,7 @@ import yaml
 
 from src.features.horizon_features import add_horizon_features
 from src.features.io import build_cell_timeline, load_raw
+from src.features.mask_augmentation import apply_augmented_masking, select_gap_months
 from src.features.seasonal import add_climatology_features
 from src.features.target_month_encoding import add_target_month_encoding
 from src.features.temporal_lags import add_lag_features
@@ -20,11 +21,32 @@ NON_FEATURE_COLUMNS = {"lat", "lon", "ID", "time", "target", "TWS_t_masked", "is
 
 
 def build_features(
-    raw_dir: Path, features_config: dict
+    raw_dir: Path,
+    features_config: dict,
+    masking_config: dict | None = None,
+    rng=None,
 ) -> tuple[list, list, list]:
-    """Construit les dataframes train/test enrichis et la liste des colonnes features légitimes."""
+    """Construit les dataframes train/test enrichis et la liste des colonnes features légitimes.
+
+    Sans `masking_config`/`rng` (défaut) : comportement Phase 2 inchangé, aucun masquage
+    augmenté. Avec les deux fournis : insère un tirage de masquage augmenté (mois entiers, mode
+    dynamique uniquement — voir `mask_augmentation.py`) avant de recalculer lags/climatologie/
+    horizon. Rien n'est jamais mis en cache sur disque pour cette variante : chaque appel avec un
+    `rng` différent doit être refait entièrement par l'appelant (Phase 4/5, pas encore écrite).
+    """
     train, test = load_raw(raw_dir)
     panel = build_cell_timeline(train, test)
+
+    if masking_config is not None:
+        if rng is None:
+            raise ValueError(
+                "rng est requis quand masking_config est fourni (mode dynamique uniquement)."
+            )
+        existing_train_months = panel.loc[panel["is_train"], "time"]
+        gap_months = select_gap_months(
+            existing_train_months, masking_config["target_gap_rate_by_period"], rng
+        )
+        panel = apply_augmented_masking(panel, gap_months)
 
     panel = add_lag_features(panel, features_config)
     panel = add_climatology_features(panel)

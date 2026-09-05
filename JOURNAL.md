@@ -160,3 +160,51 @@ cellule indépendamment ; fréquence croissante dans le temps, calibrée sur les
 train). Une fois le train augmenté, réappliquer `horizon_features.add_horizon_features` dessus
 (même fonction, juste un nom de colonne de masquage différent) pour obtenir une vraie
 distribution d'horizons côté train, cohérente avec celle du test.
+
+## 2026-09-05 — Phase 3 : masquage augmenté (mode dynamique uniquement)
+
+Implémenté en mode plan (deux allers-retours de révision avec l'utilisateur avant codage — voir
+décisions ci-dessous, qui divergent de ce que ce journal anticipait après la Phase 2).
+
+- **Décision 1** : masquage par **mois calendaires entiers**, jamais par cellule indépendamment
+  — confirme et applique la découverte de Phase 1 (le vrai masquage GRACE opère par mois, pas
+  par cellule). Le texte du brief §4.2, qui décrivait un tirage indépendant par ligne/cellule, a
+  été **corrigé** en conséquence (demande explicite de l'utilisateur : "corrige l'erreur du brief
+  sur le chapitre cité").
+- **Décision 2** (revirement par rapport au premier plan proposé) : **aucune version statique
+  figée dans un Parquet** — l'utilisateur a rejeté la proposition initiale (masque tiré une fois,
+  mis en cache sur disque comme les autres features Phase 2). Motif donné : un entraînement sur
+  un masque unique figé ne généralise pas aussi bien qu'un entraînement exposé à plusieurs
+  tirages différents. Mode dynamique uniquement : `pipeline.build_features(..., masking_config,
+  rng)` recalcule tout en mémoire (lags, climatologie, horizon) à chaque appel, rien n'est
+  persisté.
+- **Décision 3** (clarification de portée) : la Phase 3 livre uniquement le **mécanisme
+  réutilisable** (une fonction rejouable avec un `rng` différent à chaque appel) — la vraie
+  boucle multi-tirages (ensemble de modèles, ou callback d'époque pour un modèle itératif type
+  LSTM/TCN) est explicitement laissée à la Phase 4/5, qui n'existe pas encore. Confirmé après
+  avoir proposé de construire la boucle maintenant et que l'utilisateur ait préféré respecter la
+  séparation des phases du brief.
+- **Détail architectural important** : la climatologie d'une ligne de test dépend de l'historique
+  complet de la cellule (années antérieures, y compris train) — donc masquer le train affecte
+  aussi les features de test (climatologie/anomalie, jamais `TWS_t`/`TWS_t_masked` du test qui
+  restent le vrai masquage). Train ET test doivent donc être reconstruits ensemble à chaque
+  tirage pour rester cohérents entre eux.
+- `build_features(raw_dir, features_config)` (sans masquage) reste rétrocompatible — vérifié :
+  `dvc repro feature_engineering` produit les mêmes fichiers qu'avant (seules les dépendances de
+  `dvc.lock` ont changé, pas les sorties), les 11 tests Phase 2 restent verts.
+- 7 nouveaux tests (`tests/test_mask_augmentation.py`) : isolation train/test, mois entier masqué
+  pour toutes les cellules, `target` jamais modifié, reproductibilité par seed, deux seeds
+  donnent des résultats différents, test d'intégration sur données réelles.
+- Vérifié sur données réelles (2 seeds différentes) : distributions d'horizon différentes à
+  chaque tirage, plage jusqu'à 13-37 mois (plus large que le 1-7 du test, car des mois masqués
+  consécutifs peuvent s'accumuler sur plusieurs tirages — pas un problème, juste un effet
+  secondaire du tirage aléatoire indépendant par mois).
+- ADR `docs/decisions/0003-augmented-masking-mechanism.md`.
+
+### Prochaine étape
+
+Phase 4 — baseline et validation (`src/validation/`) : splits temporel (rolling/expanding-window)
+et spatial (GroupKFold par cellule/bassin versant), métriques (MAE, RMSE, R²) par fold, baseline
+de persistance + fallback climatologie, tracking MLflow. C'est là que sera construite la
+première vraie boucle d'entraînement qui décidera comment exploiter le mécanisme de masquage
+dynamique de la Phase 3 (combien de tirages, ensemble ou non).
