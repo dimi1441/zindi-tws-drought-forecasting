@@ -201,6 +201,20 @@ décisions ci-dessous, qui divergent de ce que ce journal anticipait après la P
   secondaire du tirage aléatoire indépendant par mois).
 - ADR `docs/decisions/0003-augmented-masking-mechanism.md`.
 
+## 2026-09-05 — Correction de process : `dvc push` oublié depuis la Phase 2
+
+Constat (question de l'utilisateur) : `dvc.yaml`/`dvc.lock` étaient bien tenus à jour et commités
+à chaque fois, mais **`dvc push` n'avait jamais été exécuté depuis la Phase 2** — les CSV bruts
+avaient été poussés vers le remote local en Phase 0, mais pas `train_features.parquet` ni
+`test_features.parquet`. Concrètement, les commits `fffda00` (Phase 2) et `5f50c46` (Phase 3) ont
+chacun ajouté/modifié ces outputs sans push correspondant vers
+`C:\Users\user\Documents\PERSO\ZINDI\dvc-storage-drought-zindi`.
+
+- Rattrapé le 2026-09-05 : `dvc push` exécuté (2 fichiers), `dvc data status --not-in-remote`
+  confirme "No changes." depuis.
+- Règle ajoutée dans `CLAUDE.md` (nouveau fichier) : tout commit qui touche un output DVC doit
+  être suivi d'un `dvc push`, pas seulement d'un commit git de `dvc.lock`.
+
 ### Prochaine étape
 
 Phase 4 — baseline et validation (`src/validation/`) : splits temporel (rolling/expanding-window)
