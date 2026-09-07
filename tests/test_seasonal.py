@@ -49,3 +49,15 @@ def test_masked_row_does_not_pollute_or_break_subsequent_climatology():
     # L'anomalie de la ligne masquée elle-même est NaN (TWS_t - climatologie = NaN - x).
     row_2004 = df[df["time"] == pd.Timestamp("2004-01-01")].iloc[0]
     assert np.isnan(row_2004["TWS_t_seasonal_anomaly"])
+
+
+def test_climatology_count_tracks_number_of_prior_years_used():
+    # Même trou (2004 absent) que `test_missing_year_is_skipped_not_treated_as_zero`, pour
+    # vérifier que le compte suit exactement les mêmes années que celles utilisées par la moyenne.
+    df = add_climatology_features(_one_cell_januaries(with_gap=True))
+    df = df.sort_values("time").reset_index(drop=True)
+
+    assert np.isnan(df.loc[0, "TWS_t_climatology_count"])  # 2002 : aucune année antérieure
+    assert df.loc[1, "TWS_t_climatology_count"] == 1  # 2003 : {2002}
+    assert df.loc[2, "TWS_t_climatology_count"] == 2  # 2005 : {2002, 2003} (2004 absent, ignoré)
+    assert df.loc[3, "TWS_t_climatology_count"] == 3  # 2006 : {2002, 2003, 2005}

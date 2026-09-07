@@ -26,7 +26,12 @@ feature_columns:
 - SPEI_12_t_lag3
 - SOIL_MOISTURE_t_lag1
 - SOIL_MOISTURE_t_lag3
+- TWS_t_diff1_expanding_mean
+- TWS_t_diff1_expanding_mean_count
+- TWS_t_diff12_expanding_mean
+- TWS_t_diff12_expanding_mean_count
 - TWS_t_climatology_mean
+- TWS_t_climatology_count
 - TWS_t_seasonal_anomaly
 - months_since_last_observed_tws
 - last_observed_tws

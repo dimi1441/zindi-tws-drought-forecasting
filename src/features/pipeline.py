@@ -13,6 +13,7 @@ from src.features.mask_augmentation import apply_augmented_masking, select_gap_m
 from src.features.seasonal import add_climatology_features
 from src.features.target_month_encoding import add_target_month_encoding
 from src.features.temporal_lags import add_lag_features
+from src.features.trend import add_trend_features
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -49,6 +50,7 @@ def build_features(
         panel = apply_augmented_masking(panel, gap_months)
 
     panel = add_lag_features(panel, features_config)
+    panel = add_trend_features(panel)
     panel = add_climatology_features(panel)
     panel = add_horizon_features(panel)
     panel = add_target_month_encoding(panel)
