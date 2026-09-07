@@ -8,6 +8,17 @@ GBR. Validé sur `run_bagging.py` (mêmes seeds, même harnais que les baselines
 meilleur que LightGBM+early-stopping (0.384) en temporel mais pas en spatial (0.349) — remplace la
 précédente soumission LightGBM mono-tirage sur demande explicite de l'utilisateur.
 
+**Correction du 2026-09-06** (trouvée en discutant du processus d'inférence avec l'utilisateur) :
+les features dérivées de test (lags, climatologie, horizon) reposent sur l'historique de train
+(panel combiné, `build_cell_timeline`) — si on les calcule à partir d'un train *masqué* par le
+tirage augmenté utilisé pour l'entraînement, on dégrade artificiellement les features de test avec
+des trous fictifs, alors qu'à l'inférence l'historique réel et complet de train est disponible.
+Le masquage augmenté est une technique d'entraînement (exposer le modèle à des trous simulés),
+pas une dégradation qui doit aussi s'appliquer aux features qu'on calcule pour la vraie
+prédiction finale. Donc : les features de test sont maintenant calculées **une seule fois, sans
+aucun masquage** (`build_features(...)` sans `masking_config`/`rng`), partagées par les 3 membres
+du bag — seul l'entraînement (train_df) varie par tirage de masquage.
+
 Usage : `python -m src.generate_submission`
 """
 
@@ -26,47 +37,64 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # utilisateur) : 42 = même premier tirage que le reste du projet, 43/44 = deux tirages de plus.
 BAGGING_SEEDS = [42, 43, 44]
 
+# Ajoutées le 2026-09-07 (tendance long terme + comptes de fiabilité) : `run_bagging.py` a montré
+# qu'elles dégradent légèrement le MAE temporel du bag (0.377 vs 0.372) alors qu'elles l'aident en
+# spatial -- le temporel est le schéma le plus proche du vrai test Zindi (mêmes cellules, mois
+# futurs), donc explicitement exclues ici. `configs/feature_columns.yaml` est régénéré à 38
+# colonnes à chaque run du pipeline de features (`pipeline.py`), donc NE JAMAIS le charger tel
+# quel ici sans ce filtre -- piège déjà tombé dessus une fois (soumission du 2026-09-07 générée
+# par erreur avec les 38 features avant ce correctif).
+EXCLUDED_FEATURE_COLUMNS = {
+    "TWS_t_climatology_count",
+    "TWS_t_diff1_expanding_mean",
+    "TWS_t_diff1_expanding_mean_count",
+    "TWS_t_diff12_expanding_mean",
+    "TWS_t_diff12_expanding_mean_count",
+}
+
 
 def main() -> None:
     base_config = yaml.safe_load((PROJECT_ROOT / "configs" / "base.yaml").read_text())
     features_config = yaml.safe_load((PROJECT_ROOT / "configs" / "features.yaml").read_text())
     masking_config = features_config["masking"]
-    feature_columns = yaml.safe_load(
+    all_feature_columns = yaml.safe_load(
         (PROJECT_ROOT / "configs" / "feature_columns.yaml").read_text()
     )["feature_columns"]
+    feature_columns = [c for c in all_feature_columns if c not in EXCLUDED_FEATURE_COLUMNS]
 
     mlflow.set_tracking_uri(base_config["mlflow"]["tracking_uri"])
     mlflow.set_experiment(base_config["mlflow"]["experiment_name"])
 
     raw_dir = PROJECT_ROOT / base_config["paths"]["raw_dir"]
 
+    # Historique de train réel, non masqué : sert uniquement à calculer les features de test
+    # (partagées par tous les membres du bag), jamais à l'entraînement. Voir la note de
+    # correction ci-dessus.
+    _, test_df_real, _ = build_features(raw_dir, features_config)
+
     with mlflow.start_run(run_name="final_submission"):
         mlflow.log_param("masking_seeds", BAGGING_SEEDS)
         mlflow.log_param("model", "bagged_gbr")
         mlflow.log_param("n_models", len(BAGGING_SEEDS))
         mlflow.log_param("n_features", len(feature_columns))
+        mlflow.log_param("test_features_masking", "none (real train history)")
 
         member_predictions = []
-        test_ids = None
         for seed in BAGGING_SEEDS:
             rng = np.random.default_rng(seed)
-            train_df, test_df, _ = build_features(raw_dir, features_config, masking_config, rng)
-            if test_ids is None:
-                test_ids = test_df["ID"].to_numpy()
-            else:
-                assert (test_df["ID"].to_numpy() == test_ids).all(), (
-                    "l'ordre des lignes de test a changé entre deux tirages de masquage"
-                )
+            train_df, _, _ = build_features(raw_dir, features_config, masking_config, rng)
             member_predictions.append(
-                fit_predict_gbr(train_df, test_df, feature_columns)
+                fit_predict_gbr(train_df, test_df_real, feature_columns)
             )
 
         mlflow.log_param("n_train_rows", len(train_df))
-        mlflow.log_param("n_test_rows", len(test_df))
+        mlflow.log_param("n_test_rows", len(test_df_real))
 
         predictions = np.mean(member_predictions, axis=0)
 
-        test_predictions = pd.DataFrame({"ID": test_ids, "Target": predictions})
+        test_predictions = pd.DataFrame(
+            {"ID": test_df_real["ID"].to_numpy(), "Target": predictions}
+        )
 
         sample_submission = pd.read_csv(raw_dir / "SampleSubmission.csv")
         submission = sample_submission[["ID"]].merge(
@@ -78,7 +106,11 @@ def main() -> None:
         submissions_dir = PROJECT_ROOT / "submissions"
         submissions_dir.mkdir(parents=True, exist_ok=True)
         submission_path = submissions_dir / "submission.csv"
-        submission.to_csv(submission_path, index=False)
+        # `lineterminator="\n"` : pandas écrit sinon le retour à la ligne natif de l'OS (CRLF sur
+        # Windows) alors que `SampleSubmission.csv` (fourni par Zindi) est en LF -- constaté être
+        # une cause probable de rejet par la plateforme (2026-09-07). `float_format` évite aussi
+        # une précision à 17 chiffres significatifs, inutile et non standard.
+        submission.to_csv(submission_path, index=False, lineterminator="\n", float_format="%.6f")
         mlflow.log_artifact(str(submission_path))
 
         print(f"submission.csv : {submission.shape}, n_models={len(BAGGING_SEEDS)}")
