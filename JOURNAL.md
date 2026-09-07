@@ -434,9 +434,151 @@ pour la reproductibilité.
   pipelines are up to date." ensuite. `dvc push` à faire dans la foulée de ce commit (règle
   `CLAUDE.md`).
 
-### Prochaine étape
+### Prochaine étape (2026-09-05)
 
 Toujours en attente (inchangé depuis la Phase 7) : voisinage spatial (itération D), analyse
 d'erreurs (Phase 6), covariables externes (itération F), modèle itératif (itération G). Nouvelle
 piste identifiée ce jour : bagging appliqué à LightGBM (au lieu du GBR) pour cumuler le gain du
 bagging et celui déjà mesuré de LightGBM+early-stopping en spatial.
+
+## 2026-09-06 — Correction du calcul des features de test à l'inférence
+
+En expliquant à l'utilisateur comment se passe l'inférence sur le jeu de test, un bug a été
+trouvé : `generate_submission.py` calculait les features dérivées de test (lags, climatologie,
+horizon) à partir de l'historique de train *masqué* par le même tirage augmenté utilisé pour
+entraîner chaque membre du bag — dégradant artificiellement les features de test avec des trous
+fictifs, alors qu'à l'inférence l'historique réel et complet de train est disponible. Le masquage
+augmenté est une technique d'entraînement (exposer le modèle à des trous simulés pour la
+robustesse), pas une dégradation qui doit aussi s'appliquer aux features qu'on calcule pour la
+vraie prédiction finale.
+
+- Corrigé : les features de test sont maintenant calculées **une seule fois, sans aucun
+  masquage** (`build_features(...)` sans `masking_config`/`rng`), partagées par les 3 membres du
+  bag — seul l'entraînement (`train_df`) varie encore par tirage de masquage.
+- **Impact mesuré** (comparaison ancien/nouveau `submission.csv`) : ~51 % des lignes de test ont
+  changé de plus de 0,01 (écart absolu moyen 0,02, max 0,55 sur l'échelle standardisée ~[-2, 2])
+  — un vrai changement, pas cosmétique.
+- Le même schéma affecte probablement `run_baselines.py`/`run_bagging.py` (le `val_df` de la CV
+  provient du même `train_df` masqué que `fit_df`) — délibérément laissé tel quel pour ne pas
+  invalider les chiffres de comparaison déjà enregistrés ; seul le chemin de soumission finale a
+  été corrigé. À revisiter si les chiffres de CV doivent être fiables au chiffre près plus tard.
+
+## 2026-09-07 — Nouvelles features : tendance de long terme + comptes de fiabilité
+
+Discussion approfondie avec l'utilisateur sur la nature des features existantes (lags = point
+précis, rolling mean = fenêtre fixe, climatologie = seule feature à fenêtre croissante/tout
+l'historique). Proposition retenue : ajouter deux variables de tendance de long terme, cumulées
+sur tout l'historique de la cellule (comme la climatologie mais sans regroupement par mois
+calendaire), appliquées aux variations plutôt qu'au niveau brut (pour éviter la redondance avec la
+climatologie) — `TWS_t_diff1_expanding_mean` et `TWS_t_diff12_expanding_mean`. Plus, sur suggestion
+de l'utilisateur : un compte `_count` pour chaque moyenne à fenêtre variable (dont
+`TWS_t_climatology_count`, rétrofitté), pour que le modèle puisse discount une moyenne calculée
+sur peu de données.
+
+- Nouveau module `src/features/trend.py`, `seasonal.py` étendu (`TWS_t_climatology_count`),
+  câblé dans `pipeline.py` juste après `add_lag_features`. 33 → 38 features
+  (`configs/feature_columns.yaml`, régénéré automatiquement à chaque run du pipeline — **donc
+  tout code qui le lit doit explicitement décider s'il veut les 5 nouvelles colonnes ou non**).
+- 8 nouveaux tests (`test_trend.py` + extension `test_seasonal.py`), 38 au total, tous verts.
+- **Résultat 5-fold CV réel (les 3 familles de modèles)** :
+
+  | Modèle | Temporel 33→38 | Spatial 33→38 |
+  |---|---|---|
+  | GBR toutes features | 0,384 → 0,387 (pire) | 0,366 → 0,361 (mieux) |
+  | LightGBM + early stopping | 0,384 → 0,386 (pire) | 0,349 → **0,339** (mieux, meilleur spatial à ce jour) |
+  | Bag de 3 GBR | **0,372** → 0,377 (pire) | 0,360 → 0,355 (mieux) |
+
+  Motif cohérent partout : les nouvelles features aident systématiquement en spatial, nuisent
+  légèrement en temporel. **Décision : ne pas les utiliser pour la soumission finale** — le vrai
+  test Zindi ressemble beaucoup plus au schéma temporel (mêmes cellules, mois futurs) qu'au
+  spatial, et c'est justement le schéma où elles nuisent. Gardées pour une future itération
+  orientée spatial.
+- **Bug causé par cette régénération automatique** : `generate_submission.py` lisait
+  `feature_columns` directement depuis `configs/feature_columns.yaml` sans filtre — une
+  soumission a été générée par erreur avec le bag à 38 features (0,377) sans que ce choix soit
+  délibéré. Corrigé avec un `EXCLUDED_FEATURE_COLUMNS` explicite dans `generate_submission.py`.
+
+## 2026-09-06/07 — ANN avec masquage par époque (résultat négatif, mais instructif)
+
+L'utilisateur voulait exercer le vrai mécanisme de masquage dynamique par époque du brief (§4.2),
+qui suppose un modèle itératif — jamais fait jusqu'ici (GBM n'a pas de notion d'époque, cf.
+bagging du 2026-09-05). Planifié d'abord pour un LSTM (voir plan approuvé via EnterPlanMode :
+`nn.LSTM` causal uniquement, recalcul tensoriel des features par époque pour éviter de rejouer le
+pipeline pandas 50-150+ fois, holdout à deux niveaux) — **bloqué sur l'installation de `torch`** :
+l'index de roues CUDA de `download.pytorch.org` est joignable pour une requête rapide mais expire
+sur la récupération complète de l'index par pip, 2 sessions/tentatives séparées. Une seule
+tentative fraîche par session, conformément à la règle de retry établie en Phase 0 — abandonné
+sans boucler.
+
+Architecture repensée à deux reprises avec l'utilisateur avant de coder quoi que ce soit :
+1. **LSTM → ANN simple** : TWS est un processus lisse/saisonnier où les features déjà construites
+   (lags/climatologie) captent déjà la majorité du signal mesurable (gain Phase 5 itération B+C) —
+   un ANN memoryless + features explicites isole proprement "est-ce que la diversité de masquage
+   par époque aide" de "est-ce qu'une architecture séquentielle aide", et a une surface de risque
+   de fuite bien plus petite qu'un LSTM (aucune récurrence/padding à sécuriser).
+2. **PyTorch → `sklearn.neural_network.MLPRegressor`** : `torch` toujours pas installé ;
+   `partial_fit()` correspond exactement au besoin (une itération de plus par appel) sans boucle
+   d'entraînement custom.
+
+Implémentation réelle (pas un script jetable) dans `src/models/ann/{feature_tensors,
+dynamic_features,train}.py` :
+- `feature_tensors.py` : scaffold statique `(n_cells, T_max)` par cellule, calculé une seule fois,
+  avec un index de bucket climatologique précalculé pour vectoriser le regroupement par mois sans
+  `groupby` pandas.
+- `dynamic_features.py` : réimplémentation tensorielle de toutes les features dérivées de
+  `TWS_t`, chacune testée en **parité exacte** contre la fonction pandas correspondante
+  (`tests/test_ann_dynamic_features.py`) — plus un test de **causalité au niveau des features**
+  (perturber le masquage d'un mois tardif ne doit rien changer aux lignes antérieures d'une
+  cellule), la vraie preuve anti-fuite pour ce nouveau code (un modèle memoryless n'a de risque de
+  fuite que dans le recalcul de features, jamais dans le réseau).
+- `train.py` : holdout à deux niveaux, prétraitement (`SimpleImputer` + `StandardScaler`) ajusté
+  **une seule fois** sur la vue réelle non masquée, jamais par époque — même principe que la
+  correction du 06/09.
+- 13 nouveaux tests (`test_ann_*.py`), 48 au total, tous verts.
+
+**Résultat sur données réelles, un seul split temporel (pas encore de 5-fold)** :
+
+| Configuration | MAE | Meilleur epoch |
+|---|---|---|
+| 33 features, LR=1e-3, masque variable | 0,438 | 2/23 |
+| 38 features, LR=1e-3, masque variable | 0,440 | 2/23 |
+| 33 features, LR=1e-3, masque **fixe** (diagnostic) | 0,438 | 2/23 |
+| 33 features, **LR=1e-4**, masque variable | 0,437 | 14/45 |
+
+Diagnostic mené avec l'utilisateur : le meilleur epoch trouvé dès l'époque 2 suggérait une
+instabilité d'entraînement. Un masquage fixe (comme le GBR) donne un résultat quasi identique —
+**élimine le masquage par époque comme cause**. Un taux d'apprentissage 10× plus faible corrige
+bien la stabilité (meilleur epoch repoussé à 14 au lieu de 2) mais ne change presque rien au score
+final. **Conclusion : l'ANN plafonne bien au-dessus de tous les GBM testés** (meilleur GBM : 0,339
+spatial / 0,372 temporel) — cohérent avec le fait bien documenté que le gradient boosting domine
+généralement les MLP simples sur données tabulaires. La diversité de masquage par époque, en soi,
+ne compense pas ce désavantage structurel. Le bag de GBR reste le meilleur modèle. LSTM/TCN pas
+abandonné, juste déprioritisé.
+
+## 2026-09-07 — Correction du format de soumission (rejet par la plateforme Zindi)
+
+L'utilisateur signale que sa soumission est rejetée par Zindi ; quelqu'un dans le chat de la
+compétition suggère un problème de connexion. Vérification directe (diff des fichiers plutôt que
+suppositions) contre `data/raw/SampleSubmission.csv` : deux différences réelles trouvées, aucune
+liée à un problème de connexion — (1) `submission.csv` était écrit avec des fins de ligne Windows
+CRLF (`\r\n`, comportement par défaut de pandas `to_csv` sous Windows) alors que le fichier
+Zindi utilise du LF (`\n`) pur — cause classique de rejet par un validateur d'upload strict ; (2)
+précision à 17 chiffres significatifs (défaut pandas) contre des entiers simples dans l'exemple —
+pas forcément fatal mais inutilement volumineux.
+
+- Corrigé avec `to_csv(..., lineterminator="\n", float_format="%.6f")` dans
+  `generate_submission.py`. **Confirmé par l'utilisateur : le nouvel upload a fonctionné.**
+- Fichier `submissions/submission_2dp.csv` généré à la demande (précision à 2 décimales), en plus
+  du fichier principal à 6 décimales — pour réduire davantage la taille si nécessaire.
+- Nouveau `scripts/submit_to_zindi.py` : soumission directe via l'API Zindi avec un timeout
+  configurable (repli en cas de connexion instable). Endpoint/contrat vérifiés contre le code
+  source d'un client Zindi tiers non officiel (`github.com/KameniAlexNea/zindi`), pas la
+  documentation officielle Zindi — signalé comme tel dans le script.
+
+### Prochaine étape (2026-09-07)
+
+Voisinage spatial (itération D), analyse d'erreurs (Phase 6), covariables externes (itération F).
+Modèle itératif (itération G) toujours pas concluant : LSTM/TCN déprioritisé faute d'installation
+de `torch`, ANN (sklearn) testé mais plafonne au-dessus des GBM. `run_baselines.py`/`run_bagging.py`
+pourraient bénéficier de la même correction d'inférence que `generate_submission.py` (val_df
+calculé sur train masqué) si des chiffres de CV plus précis sont nécessaires plus tard.
