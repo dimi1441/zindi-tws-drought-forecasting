@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from src.features.feature_columns import load_model_feature_columns
 from src.features.pipeline import build_features
 from src.validation.baselines import (
     fit_predict_gbr,
@@ -119,9 +120,7 @@ def main() -> None:
     mlflow.set_tracking_uri(base_config["mlflow"]["tracking_uri"])
     mlflow.set_experiment(base_config["mlflow"]["experiment_name"])
 
-    feature_columns = yaml.safe_load(
-        (PROJECT_ROOT / "configs" / "feature_columns.yaml").read_text()
-    )["feature_columns"]
+    feature_columns = load_model_feature_columns(PROJECT_ROOT / "configs")
 
     raw_dir = PROJECT_ROOT / base_config["paths"]["raw_dir"]
     rng = np.random.default_rng(MASKING_SEED)

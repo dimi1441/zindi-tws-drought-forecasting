@@ -1,12 +1,16 @@
-"""Génère `submissions/submission.csv` : bagging de 3 GBR (`make_gbr_pipeline()`, décision
+"""Génère `submissions/submission.csv` : bagging de 8 GBR (`make_gbr_pipeline()`, décision
 explicite de l'utilisateur du 2026-09-05, voir `src/validation/run_bagging.py`), chacun entraîné
-sur 100% du train mais avec un tirage de masquage augmenté différent (seeds 42/43/44, mode
+sur 100% du train mais avec un tirage de masquage augmenté différent (seeds 42..49, mode
 dynamique, Phase 3) — la diversité vient du masquage, pas d'un bootstrap des lignes ni du hasard
-interne du modèle (`random_state=42` fixe sur chaque membre). Prédiction finale = moyenne des 3
-GBR. Validé sur `run_bagging.py` (mêmes seeds, même harnais que les baselines précédentes) : MAE
-0.372 (temporel) / 0.360 (spatial), meilleur que le GBR seul (0.384 / 0.366) sur les deux schémas,
-meilleur que LightGBM+early-stopping (0.384) en temporel mais pas en spatial (0.349) — remplace la
-précédente soumission LightGBM mono-tirage sur demande explicite de l'utilisateur.
+interne du modèle (`random_state=42` fixe sur chaque membre). Prédiction finale = moyenne des 8
+GBR.
+
+**N=8 choisi le 2026-09-07** via `run_bagging_curve.py` (courbe MAE vs nombre de membres,
+schéma temporel, 15 tirages testés) : MAE 0.3838 (N=1) → 0.3725 (N=2) → 0.3717 (N=3, ancien
+réglage) → plateau bruité autour de 0.368-0.369 dès N≈8, meilleur observé 0.3683 à N=8, aucun
+gain net au-delà (N=15 : 0.3689, dans le bruit inter-folds ~0.037). Le schéma spatial n'a pas été
+remesuré à N=8 (dernier chiffre connu à N=3 : 0.360, `reports/fold_detail_bagged_gbr_spatial.csv`)
+— non prioritaire car le vrai test Zindi ressemble au schéma temporel, pas spatial.
 
 **Correction du 2026-09-06** (trouvée en discutant du processus d'inférence avec l'utilisateur) :
 les features dérivées de test (lags, climatologie, horizon) reposent sur l'historique de train
@@ -29,38 +33,22 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from src.features.feature_columns import load_model_feature_columns
 from src.features.pipeline import build_features
 from src.validation.baselines import fit_predict_gbr
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-# Mêmes seeds que `run_bagging.py`, fixées explicitement pour la reproductibilité (demande
-# utilisateur) : 42 = même premier tirage que le reste du projet, 43/44 = deux tirages de plus.
-BAGGING_SEEDS = [42, 43, 44]
-
-# Ajoutées le 2026-09-07 (tendance long terme + comptes de fiabilité) : `run_bagging.py` a montré
-# qu'elles dégradent légèrement le MAE temporel du bag (0.377 vs 0.372) alors qu'elles l'aident en
-# spatial -- le temporel est le schéma le plus proche du vrai test Zindi (mêmes cellules, mois
-# futurs), donc explicitement exclues ici. `configs/feature_columns.yaml` est régénéré à 38
-# colonnes à chaque run du pipeline de features (`pipeline.py`), donc NE JAMAIS le charger tel
-# quel ici sans ce filtre -- piège déjà tombé dessus une fois (soumission du 2026-09-07 générée
-# par erreur avec les 38 features avant ce correctif).
-EXCLUDED_FEATURE_COLUMNS = {
-    "TWS_t_climatology_count",
-    "TWS_t_diff1_expanding_mean",
-    "TWS_t_diff1_expanding_mean_count",
-    "TWS_t_diff12_expanding_mean",
-    "TWS_t_diff12_expanding_mean_count",
-}
+# Mêmes seeds que `run_bagging.py`/`run_bagging_curve.py`, fixées explicitement pour la
+# reproductibilité (demande utilisateur) : 42 = même premier tirage que le reste du projet,
+# 43..49 = les 7 tirages suivants (N=8 retenu suite à `run_bagging_curve.py`, cf. docstring).
+BAGGING_SEEDS = [42, 43, 44, 45, 46, 47, 48, 49]
 
 
 def main() -> None:
     base_config = yaml.safe_load((PROJECT_ROOT / "configs" / "base.yaml").read_text())
     features_config = yaml.safe_load((PROJECT_ROOT / "configs" / "features.yaml").read_text())
     masking_config = features_config["masking"]
-    all_feature_columns = yaml.safe_load(
-        (PROJECT_ROOT / "configs" / "feature_columns.yaml").read_text()
-    )["feature_columns"]
-    feature_columns = [c for c in all_feature_columns if c not in EXCLUDED_FEATURE_COLUMNS]
+    feature_columns = load_model_feature_columns(PROJECT_ROOT / "configs")
 
     mlflow.set_tracking_uri(base_config["mlflow"]["tracking_uri"])
     mlflow.set_experiment(base_config["mlflow"]["experiment_name"])
@@ -108,9 +96,10 @@ def main() -> None:
         submission_path = submissions_dir / "submission.csv"
         # `lineterminator="\n"` : pandas écrit sinon le retour à la ligne natif de l'OS (CRLF sur
         # Windows) alors que `SampleSubmission.csv` (fourni par Zindi) est en LF -- constaté être
-        # une cause probable de rejet par la plateforme (2026-09-07). `float_format` évite aussi
-        # une précision à 17 chiffres significatifs, inutile et non standard.
-        submission.to_csv(submission_path, index=False, lineterminator="\n", float_format="%.6f")
+        # une cause probable de rejet par la plateforme (2026-09-07). `float_format` à 2 décimales
+        # (demande utilisateur du 2026-09-07) au lieu d'une précision à 17 chiffres significatifs,
+        # inutile et non standard.
+        submission.to_csv(submission_path, index=False, lineterminator="\n", float_format="%.2f")
         mlflow.log_artifact(str(submission_path))
 
         print(f"submission.csv : {submission.shape}, n_models={len(BAGGING_SEEDS)}")

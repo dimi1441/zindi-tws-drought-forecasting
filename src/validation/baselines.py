@@ -2,6 +2,7 @@
 (réplique le modèle du starter) — évaluées à travers le harnais de validation.
 """
 
+import time
 from collections.abc import Callable
 
 import lightgbm as lgb
@@ -74,6 +75,22 @@ def fit_predict_simple_gbr(fit_df: pd.DataFrame, val_df: pd.DataFrame) -> np.nda
     return fit_predict_gbr(fit_df, val_df, SIMPLE_FEATURES)
 
 
+def fit_predict_bagged_gbr_members(
+    fit_dfs: list[pd.DataFrame], val_dfs: list[pd.DataFrame], feature_columns: list[str]
+) -> tuple[np.ndarray, list[float]]:
+    """Comme `fit_predict_bagged_gbr`, mais retourne les prédictions de chaque membre séparément
+    (shape `(n_models, n_val)`) plutôt que leur moyenne, plus le temps fit+predict de chacun.
+    Sert à évaluer des moyennes cumulatives sur les N premiers membres sans réentraîner — courbe
+    de bagging, Phase 5 itération E (cf. `run_bagging_curve.py`)."""
+    predictions = []
+    seconds = []
+    for fit_df, val_df in zip(fit_dfs, val_dfs):
+        start = time.perf_counter()
+        predictions.append(fit_predict_gbr(fit_df, val_df, feature_columns))
+        seconds.append(time.perf_counter() - start)
+    return np.stack(predictions, axis=0), seconds
+
+
 def fit_predict_bagged_gbr(
     fit_dfs: list[pd.DataFrame], val_dfs: list[pd.DataFrame], feature_columns: list[str]
 ) -> np.ndarray:
@@ -85,11 +102,8 @@ def fit_predict_bagged_gbr(
     diffèrent) — construites par l'appelant en appliquant le même masque fit/val à chaque
     `build_features(..., rng=seed_i)`.
     """
-    predictions = [
-        fit_predict_gbr(fit_df, val_df, feature_columns)
-        for fit_df, val_df in zip(fit_dfs, val_dfs)
-    ]
-    return np.mean(predictions, axis=0)
+    predictions, _ = fit_predict_bagged_gbr_members(fit_dfs, val_dfs, feature_columns)
+    return predictions.mean(axis=0)
 
 
 def fit_predict_lightgbm_early_stopping(

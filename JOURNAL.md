@@ -575,10 +575,65 @@ pas forcément fatal mais inutilement volumineux.
   source d'un client Zindi tiers non officiel (`github.com/KameniAlexNea/zindi`), pas la
   documentation officielle Zindi — signalé comme tel dans le script.
 
+## Phase 5, bug de colonnes de features propagé + courbe de bagging (N=8 retenu) — 2026-09-07
+
+En discutant avec l'utilisateur de combien de GBR utiliser dans le bag (au-delà des 3 fixés le
+2026-09-05), deux choses trouvées avant de coder l'expérience :
+
+**Bug trouvé — même piège que le 2026-09-07 (soumission à 38 features), pas encore corrigé
+partout** : `run_baselines.py` et `run_bagging.py` lisaient `configs/feature_columns.yaml`
+directement, sans filtrer les 5 colonnes de tendance long terme — alors que ce fichier est
+régénéré à 38 colonnes par le dernier run de `pipeline.py`. Seul `generate_submission.py` avait
+été corrigé ce jour-là. Si `run_bagging.py` avait été relancé tel quel, il aurait silencieusement
+utilisé 38 features au lieu des 33 retenues, invalidant toute comparaison avec les chiffres déjà
+enregistrés (0.372/0.360). **Corrigé en centralisant** : nouveau `src/features/feature_columns.py`
+(`EXCLUDED_FEATURE_COLUMNS` + `load_model_feature_columns()`), utilisé maintenant par les 3
+scripts (`generate_submission.py`, `run_baselines.py`, `run_bagging.py`) — plus jamais de lecture
+directe du YAML pour construire le jeu de features modèle. 48 tests toujours verts après ce
+refactor.
+
+**Stratégie retenue pour choisir N** (au lieu d'un nombre arbitraire) : nouveau
+`src/validation/run_bagging_curve.py` — entraîne un pool de 15 GBR une seule fois par fold (un par
+tirage de masquage, seeds 42..56) sur le schéma **temporel** uniquement (celui qui ressemble au
+vrai test Zindi — le spatial n'a pas été dupliqué pour limiter le coût de calcul), puis évalue la
+moyenne cumulative des N premiers membres pour N=1..15 à partir des mêmes prédictions (pas de
+réentraînement par valeur de N). Ajout de `fit_predict_bagged_gbr_members()` dans `baselines.py`
+pour exposer les prédictions individuelles (`fit_predict_bagged_gbr` refactorisé dessus, zéro
+régression, confirmé par le test existant).
+
+**Résultat réel (5-fold CV, schéma temporel)** :
+
+| N membres | MAE moyen | Écart-type inter-folds |
+|---|---|---|
+| 1 | 0,3838 | 0,049 |
+| 2 | 0,3725 | 0,039 |
+| 3 (ancien réglage) | 0,3717 | 0,039 |
+| 5 | 0,3699 | 0,038 |
+| 8 | **0,3683** (meilleur) | 0,036 |
+| 15 | 0,3689 | 0,037 |
+
+N=3 reproduit exactement le 0,372 déjà connu (bonne vérification croisée que le fix du bug de
+colonnes n'a rien cassé). Motif : vrai saut 1→2 membres (-3%), amélioration continue mais faible
+jusqu'à N≈8, puis plateau bruité jusqu'à N=15 (aucune tendance claire) — **l'écart-type
+inter-folds (~0,037) est ~10× plus grand que l'écart entre N=3 et N=8 (0,0034)**, cohérent avec
+l'hypothèse de départ : la seule source de diversité entre membres est le tirage de masquage (pas
+de bootstrap des lignes), donc corrélation plus forte entre membres et plateau plus rapide qu'un
+bagging classique.
+
+**Décision (choix utilisateur parmi 3 options proposées)** : **N=8** — meilleur MAE observé, coût
+de calcul encore trivial pour une génération de soumission ponctuelle (pas un job répété), malgré
+un gain marginal vs N=3 proche du bruit de mesure. `BAGGING_SEEDS` mis à jour à `[42..49]` dans
+`generate_submission.py` et `run_bagging.py`. **Confirmé par un rerun officiel de `run_bagging.py` avec N=8** (mêmes seeds, harnais complet
+5-fold, les deux schémas) : MAE 0,3683 temporel (identique au chiffre de la courbe — bonne
+vérification croisée) / 0,3576 spatial (léger mieux que le 0,360 à N=3, cohérent avec la
+tendance générale du bagging).
+
 ### Prochaine étape (2026-09-07)
 
 Voisinage spatial (itération D), analyse d'erreurs (Phase 6), covariables externes (itération F).
 Modèle itératif (itération G) toujours pas concluant : LSTM/TCN déprioritisé faute d'installation
 de `torch`, ANN (sklearn) testé mais plafonne au-dessus des GBM. `run_baselines.py`/`run_bagging.py`
 pourraient bénéficier de la même correction d'inférence que `generate_submission.py` (val_df
-calculé sur train masqué) si des chiffres de CV plus précis sont nécessaires plus tard.
+calculé sur train masqué) si des chiffres de CV plus précis sont nécessaires plus tard. Nouvelle
+soumission (N=8) en cours de génération — vérifier le format byte-for-byte contre
+`SampleSubmission.csv` avant tout nouvel upload Zindi (cf. le rejet du 2026-09-07).
