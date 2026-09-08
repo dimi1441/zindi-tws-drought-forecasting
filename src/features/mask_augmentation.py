@@ -16,6 +16,21 @@ def _rate_for_year(year: int, target_gap_rate_by_period: list[dict]) -> float:
     return 0.0
 
 
+def scale_gap_rate_by_period(
+    target_gap_rate_by_period: list[dict], multiplier: float, cap: float = 0.9
+) -> list[dict]:
+    """Multiplie chaque taux de période par `multiplier`, plafonné à `cap` (demande utilisateur
+    du 2026-09-07 : varier la difficulté du masquage par membre du bag, pas seulement les mois
+    tirés, pour se rapprocher du régime bien plus dur du vrai test — 67% de ses mois sont des
+    trous contre ~10-16% vus par les membres actuels à taux fixe). Le plafond évite qu'un membre
+    à fort multiplicateur se retrouve avec quasiment plus d'historique du tout sur les dernières
+    années."""
+    return [
+        {**period, "rate": min(period["rate"] * multiplier, cap)}
+        for period in target_gap_rate_by_period
+    ]
+
+
 def select_gap_months(
     existing_months: pd.Series, target_gap_rate_by_period: list[dict], rng
 ) -> set[pd.Timestamp]:

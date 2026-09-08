@@ -15,3 +15,8 @@ omegaconf==2.3.1
 pytest==8.3.4
 jupyter==1.1.1
 ipykernel==6.29.5
+
+# CPU-only build (pas de GPU dédié requis pour ce projet) : installer avec
+# `pip install torch==2.14.0+cpu --index-url https://download.pytorch.org/whl/cpu` --
+# la version "+cpu" n'existe que sur cet index, pas sur PyPI standard.
+torch==2.14.0+cpu

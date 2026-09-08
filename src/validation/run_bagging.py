@@ -3,9 +3,11 @@ itération E qui parlait d'un ensemble de modèles génériques) : moyenne de 8 
 (même hyperparamètres que le starter, cf. `baselines.py`), chacun entraîné sur un tirage de
 masquage augmenté différent (seeds 42..49 fixées explicitement pour la reproductibilité — N=8
 retenu le 2026-09-07 via `run_bagging_curve.py`, voir ce module pour la courbe MAE vs nombre de
-membres qui justifie ce choix). Pas de bootstrap des lignes en plus — la diversité vient
-uniquement des tirages de masque (mois de trous différents à chaque fois), conformément au
-mécanisme dynamique déjà en place depuis la Phase 3.
+membres qui justifie ce choix). Pas de bootstrap des lignes en plus — la diversité vient des
+tirages de masque (mois de trous différents à chaque fois, mécanisme dynamique de la Phase 3) et,
+depuis le 2026-09-07, aussi du **taux** de trou lui-même : `RATE_MULTIPLIERS` fait varier la
+difficulté du masquage par membre (spread 0.5x-2x, demande utilisateur constatant que le train
+voyait ~10-16% de mois masqués contre 67% dans le vrai test).
 
 Réutilise le même harnais que `run_baselines.py` (`temporal_splits`/`spatial_splits`, 5 folds
 chacun) pour rester directement comparable aux baselines déjà loggées (`full_features_gbr`,
@@ -23,6 +25,7 @@ import pandas as pd
 import yaml
 
 from src.features.feature_columns import load_model_feature_columns
+from src.features.mask_augmentation import scale_gap_rate_by_period
 from src.features.pipeline import build_features
 from src.validation.baselines import fit_predict_bagged_gbr
 from src.validation.metrics import aggregate_fold_metrics, compute_metrics
@@ -35,6 +38,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # le bagging (N=8, cf. run_bagging_curve.py). Toute reprise de cette expérience avec ces mêmes
 # seeds doit reproduire les mêmes résultats (build_features est déterministe à rng fixé).
 BAGGING_SEEDS = [42, 43, 44, 45, 46, 47, 48, 49]
+
+# Multiplicateur du taux de trou par membre (demande utilisateur du 2026-09-07, voir
+# `generate_submission.py` pour le détail du raisonnement) : spread modéré 0.5x-2x, linéaire par
+# position dans BAGGING_SEEDS.
+RATE_MULTIPLIERS = np.linspace(0.5, 2.0, len(BAGGING_SEEDS))
 
 SPLIT_SCHEMES = {
     "temporal": temporal_splits,
@@ -49,6 +57,7 @@ def run_bagging_scheme(
         mlflow.log_param("baseline", "bagged_gbr")
         mlflow.log_param("split_scheme", split_name)
         mlflow.log_param("masking_seeds", BAGGING_SEEDS)
+        mlflow.log_param("rate_multipliers", list(RATE_MULTIPLIERS))
         mlflow.log_param("n_models", len(BAGGING_SEEDS))
 
         fold_rows = []
@@ -97,7 +106,7 @@ def run_bagging_scheme(
 def main() -> None:
     base_config = yaml.safe_load((PROJECT_ROOT / "configs" / "base.yaml").read_text())
     features_config = yaml.safe_load((PROJECT_ROOT / "configs" / "features.yaml").read_text())
-    masking_config = features_config["masking"]
+    base_gap_rate_by_period = features_config["masking"]["target_gap_rate_by_period"]
 
     mlflow.set_tracking_uri(base_config["mlflow"]["tracking_uri"])
     mlflow.set_experiment(base_config["mlflow"]["experiment_name"])
@@ -107,8 +116,10 @@ def main() -> None:
     raw_dir = PROJECT_ROOT / base_config["paths"]["raw_dir"]
 
     train_dfs = []
-    for seed in BAGGING_SEEDS:
+    for seed, multiplier in zip(BAGGING_SEEDS, RATE_MULTIPLIERS):
         rng = np.random.default_rng(seed)
+        scaled_periods = scale_gap_rate_by_period(base_gap_rate_by_period, multiplier)
+        masking_config = {"target_gap_rate_by_period": scaled_periods}
         train_df, _, _ = build_features(raw_dir, features_config, masking_config, rng)
         train_dfs.append(train_df)
 

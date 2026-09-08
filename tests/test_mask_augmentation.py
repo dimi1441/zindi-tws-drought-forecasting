@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.mask_augmentation import apply_augmented_masking, select_gap_months
+from src.features.mask_augmentation import (
+    apply_augmented_masking,
+    scale_gap_rate_by_period,
+    select_gap_months,
+)
 
 RATE_BY_PERIOD = [{"start_year": 2020, "end_year": 2020, "rate": 1.0}]  # tout masquer, déterministe
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
@@ -85,6 +89,20 @@ def test_different_rng_can_give_different_gap_months():
     }
     # avec 10 seeds differentes et un taux de 50%, on s'attend a plus d'un resultat distinct.
     assert len(results) > 1
+
+
+def test_scale_gap_rate_by_period_multiplies_and_caps():
+    periods = [
+        {"start_year": 2002, "end_year": 2010, "rate": 0.05},
+        {"start_year": 2011, "end_year": 2014, "rate": 0.35},
+        {"start_year": 2015, "end_year": 2015, "rate": 0.50},
+    ]
+    scaled = scale_gap_rate_by_period(periods, multiplier=2.0, cap=0.9)
+    assert scaled[0]["rate"] == pytest.approx(0.10)
+    assert scaled[1]["rate"] == pytest.approx(0.70)
+    assert scaled[2]["rate"] == pytest.approx(0.9)  # 1.0 plafonné à 0.9
+    # start_year/end_year inchangés, seul rate varie
+    assert scaled[0]["start_year"] == 2002 and scaled[0]["end_year"] == 2010
 
 
 @pytest.mark.skipif(not RAW_DIR.exists(), reason="données brutes non disponibles (DVC non tiré)")

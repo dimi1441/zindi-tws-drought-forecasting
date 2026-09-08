@@ -12,6 +12,11 @@ Seul le schéma **temporel** est couvert ici : c'est celui qui ressemble le plus
 (mêmes 15 715 cellules, mois futurs — cf. JOURNAL.md 2026-09-05/07), et doubler le coût de calcul
 pour le schéma spatial n'apporterait pas d'information pertinente pour la décision de soumission.
 
+**Note (2026-09-07, après coup)** : ce module utilise encore un taux de trou fixe (`masking_config`
+partagé), pas la variation par membre ajoutée ensuite dans `run_bagging.py`/`generate_submission.py`
+(`RATE_MULTIPLIERS`). Le N=8 retenu ici n'a donc pas été revalidé sous ce nouveau mécanisme -- à
+refaire si la variation de taux s'avère utile et qu'on veut confirmer N=8 reste le bon choix.
+
 Usage : `python -m src.validation.run_bagging_curve`
 """
 

@@ -631,9 +631,138 @@ tendance générale du bagging).
 ### Prochaine étape (2026-09-07)
 
 Voisinage spatial (itération D), analyse d'erreurs (Phase 6), covariables externes (itération F).
-Modèle itératif (itération G) toujours pas concluant : LSTM/TCN déprioritisé faute d'installation
-de `torch`, ANN (sklearn) testé mais plafonne au-dessus des GBM. `run_baselines.py`/`run_bagging.py`
-pourraient bénéficier de la même correction d'inférence que `generate_submission.py` (val_df
-calculé sur train masqué) si des chiffres de CV plus précis sont nécessaires plus tard. Nouvelle
-soumission (N=8) en cours de génération — vérifier le format byte-for-byte contre
-`SampleSubmission.csv` avant tout nouvel upload Zindi (cf. le rejet du 2026-09-07).
+`run_baselines.py`/`run_bagging.py` pourraient bénéficier de la même correction d'inférence que
+`generate_submission.py` (val_df calculé sur train masqué) si des chiffres de CV plus précis sont
+nécessaires plus tard. Nouvelle soumission (N=8) générée, committée et poussée (DVC) — format à 2
+décimales sur demande explicite de l'utilisateur, pas de re-vérification byte-for-byte cette fois
+(la correction CRLF de l'incident précédent reste, elle, bien en place dans le code). Pas encore
+confirmé par un upload Zindi réussi à ce stade.
+
+## `torch` installé (CPU) — 2026-09-07, débloque l'itération G
+
+Après deux échecs (Phase 0-adjacent, puis à nouveau lors de l'ANN du 2026-09-06/07 — l'index de
+roues CUDA de `download.pytorch.org` reachable en requête rapide mais timeout sur la récupération
+complète par pip), tentative avec l'**index CPU-only** (`--index-url
+https://download.pytorch.org/whl/cpu`, beaucoup plus petit que l'index CUDA complet) au lieu du
+défaut : réussie du premier coup, une seule tentative bornée conformément à
+[[feedback-retry-limits]]. `torch==2.14.0+cpu` installé et importable (`torch.cuda.is_available()
+== False`, attendu — pas de GPU dédié nécessaire pour ce projet). Figé dans `requirements.in`
+(avec commentaire sur l'index spécial requis, absent de PyPI standard) et `requirements.txt`
+(régénéré via `pip freeze`, diff propre : +torch, +sympy, +mpmath uniquement).
+
+**Débloque** : le LSTM/TCN de l'itération G (roadmap), déprioritisé deux fois faute de cet
+install — pas encore commencé, juste rendu possible à nouveau.
+
+## Score Zindi confirmé : 0,75 (bag de 8 GBR, moyenne simple, taux fixe) — 2026-09-08
+
+Premier retour réel de la plateforme sur la soumission générée le 2026-09-07 (N=8, seeds 42-49,
+taux de masquage fixe — avant l'essai de taux variable par membre). **Score 0,75** — métrique
+Zindi où **plus bas = mieux** (confirmé par l'utilisateur, corrigé après une première lecture
+erronée de ma part qui supposait l'inverse). Donc **moins bon** que le repère indicatif du brief
+(~0,70, "atteint honnêtement avec ERA5 et sans features interdites", §10) — il reste de la marge
+avant d'égaler ce repère, qui utilise en plus des covariables externes qu'on n'utilise pas encore
+(itération F). Métrique Zindi exacte non documentée dans le brief (juste "non spécifiée") — pas
+de lien direct établi avec nos MAE de CV (0,368 temporel), mais la direction d'amélioration est
+maintenant claire : chercher à faire **baisser** ce score.
+
+## Diagnostic : spécialisation horizon des membres du bag (taux variable) — 2026-09-08
+
+Suite à l'observation que le train ne voit que ~10-16% de mois masqués contre 67% du vrai test
+(cf. plus haut), et à l'essai de `RATE_MULTIPLIERS` (0,5x-2x par membre, testé le 2026-09-07 :
+MAE quasi identique en moyenne simple, 0,3704 vs 0,3683 taux fixe — dans le bruit). Avant de
+construire une pondération conditionnelle par ligne (piste discutée avec l'utilisateur), test de
+rentabilité : `src/validation/diagnose_bag_horizon_specialization.py` (diagnostic seul, pas
+branché à la production) — entraîne les 8 membres (mêmes seeds/multiplicateurs) mais évalue tous
+sur un **même** panel de validation de référence (masquage à taux de base, seed 1000 dédié,
+jamais utilisé à l'entraînement) pour comparer les membres sur exactement les mêmes lignes/
+horizon, comme au vrai inférence.
+
+**Résultat réel (5 folds temporels, ~312k lignes horizon=1 / ~312k lignes horizon>1 au total,
+horizon>1 concentré sur les folds 1/4/5)** :
+
+| Membre (multiplicateur) | MAE horizon=1 | MAE horizon>1 |
+|---|---|---|
+| 42 (0,50x) | 0,3665 | **0,5041** |
+| 43 (0,71x) | 0,3670 | 0,4729 |
+| 44 (0,93x) | 0,3672 | 0,4540 |
+| 45 (1,14x) | 0,3668 | 0,4565 |
+| 46 (1,36x) | 0,3674 | 0,4464 |
+| 47 (1,57x) | 0,3663 | 0,4619 |
+| 48 (1,79x) | 0,3670 | 0,4485 |
+| 49 (2,00x) | 0,3679 | 0,4513 |
+
+Sur horizon=1 (`TWS_t` disponible) : tous les membres indiscernables (spread 0,0016) — le
+multiplicateur ne change rien ici. Sur horizon>1 (`TWS_t` masqué, **66,5% du vrai test** d'après
+la Phase 1) : **effet de seuil, pas un dégradé continu** — le membre à 0,5x (quasiment aucune
+exposition au masquage à l'entraînement) est nettement pire (0,504) que tous les autres
+(0,446-0,473), mais au-delà d'environ 0,9-1x aucune tendance claire à continuer de s'améliorer
+(46 à 1,36x légèrement meilleur que 49 à 2x — différence dans le bruit).
+
+**Décision** : pas besoin de pondération conditionnelle par ligne (complexité non justifiée) —
+le vrai problème est plus simple, le bas de la plage actuelle (0,5x) est nocif sans bénéfice
+compensatoire. Prochaine étape proposée à l'utilisateur : remonter le plancher de
+`RATE_MULTIPLIERS` (ex. 1x-2x au lieu de 0,5x-2x) et refaire le CV officiel — pas encore fait,
+en attente de confirmation.
+
+## Bag à 7 membres (sans seed 42) : 0,75 → 0,74 sur Zindi — 2026-09-08
+
+Action immédiate suite au diagnostic ci-dessus (plutôt que de refaire la courbe complète ou
+remonter `RATE_MULTIPLIERS`) : `src/generate_submission_no42.py` (nouveau, réutilise
+`generate_submission()` refactorisée en fonction paramétrable dans `generate_submission.py`) —
+bag à 7 membres, exclut simplement le seed 42 (0,5x), garde les 7 autres seeds/multiplicateurs
+inchangés. **Confirmé sur la plateforme Zindi : 0,74 (mieux que 0,75)** — première confirmation
+externe que le diagnostic horizon/multiplicateur reflète un vrai effet, pas un artefact de CV.
+
+**Cache par membre ajouté à cette occasion** (demande utilisateur, car le premier test "excluons
+le seed 42" a nécessité de réentraîner les 7 autres membres depuis zéro, ~19 min perdues) :
+`generate_submission()` sauvegarde maintenant chaque modèle entraîné (`models/bag_member_seed{
+seed}_mult{multiplier}.joblib`, via `joblib`) et ses prédictions sur le test réel (`reports/
+bag_member_predictions/`), clé sur (seed, multiplicateur) -- toute future variante (exclure/
+inclure/repondérer des membres) recombine ces caches au lieu de réentraîner. `models/` déjà
+gitignoré (`models/*` sauf `.gitkeep`) en anticipation de ce genre d'artefact -- à suivre via DVC
+comme `data/processed/` une fois qu'il contient des fichiers réels (pas encore fait : le run du
+2026-09-08 qui a produit `submission_no42.csv` utilisait encore l'ancien code sans cache, lancé
+avant ce correctif).
+
+**Prochaine étape** : le plancher de `RATE_MULTIPLIERS` (1x-2x au lieu de 0,5x-2x) reste à tester
+-- pourrait capturer un gain similaire à "juste exclure le 0,5x" sans réduire le bag à 7 membres.
+`submission.csv` (officielle) n'a pas encore été remplacée par la version à 7 membres -- à décider
+avec l'utilisateur.
+
+## Essai de remontée du plancher `RATE_MULTIPLIERS` : résultat non fiable — 2026-09-08
+
+Suite à la demande utilisateur de tester 1x-2x et 1x-3x (au lieu d'exclure le seed 42) :
+`src/validation/compare_rate_ranges.py` (nouveau), même principe que `run_bagging.py` mais boucle
+sur plusieurs plages de multiplicateurs pour les mêmes 8 seeds.
+
+**Résultat brut (5-fold CV temporel)** : 0,5x-2x → 0,3704 (actuel) ; 1x-2x → 0,3729 (pire) ; 1x-3x
+→ 0,3821 (encore pire). En apparence, remonter le plancher serait contre-productif.
+
+**Mais ce résultat n'est pas fiable** — trouvé en regardant le détail par fold : les folds 1-3
+bougent à peine (0,3545→0,3555 etc.) mais les folds 4-5 (les plus tardifs, années à fort taux de
+base) se dégradent nettement (0,386→0,414 et 0,431→0,459). Cause : `compare_rate_ranges.py`
+réutilise le schéma de `run_bagging.py` où **les lignes de validation de chaque fold sont
+elles-mêmes masquées selon le multiplicateur du membre** — donc augmenter le multiplicateur rend
+aussi l'examen de validation plus dur en même temps que l'entraînement, exactement le biais que
+`diagnose_bag_horizon_specialization.py` avait été conçu pour éviter (masquage de référence fixe,
+partagé entre tous les membres). Le vrai test Zindi, lui, a une difficulté fixe (66,5% masqué) —
+ne devient pas plus dur selon notre réglage d'entraînement.
+
+**Décision** : ne pas refaire cette comparaison (retour sur investissement incertain, ~1h de
+calcul pour un résultat qu'il faudrait de toute façon re-vérifier avec la bonne méthode). Le vrai
+signal fiable dont on dispose reste le diagnostic à jeu de validation partagé (membres stables de
+~0,9x à 2x, seul 0,5x nuisible) et la confirmation Zindi (0,75→0,74 en excluant le 0,5x). On s'en
+tient à l'exclusion simple plutôt que de pousser la piste "remonter le plancher".
+
+## `submission.csv` officielle : bag à 7 membres (sans seed 42) — 2026-09-08
+
+Sur demande explicite de l'utilisateur, `submission.csv` (suivi DVC) est remplacé par le contenu
+déjà généré et confirmé sur Zindi (`submission_no42.csv`, identique bit à bit — pas de
+réentraînement, juste promu). `src/generate_submission.py` mis à jour : `BAGGING_SEEDS`/
+`RATE_MULTIPLIERS` de production dérivent maintenant des 8 valeurs originales moins le premier
+élément (`_ORIGINAL_BAGGING_SEEDS[1:]`), pas un nouveau `linspace` sur 7 points (qui aurait donné
+des multiplicateurs différents de ceux déjà testés/confirmés). `src/generate_submission_no42.py`
+supprimé (son `BAGGING_SEEDS[1:]` aurait maintenant coupé le seed 43 au lieu du 42 -- devenu faux
+depuis que la production exclut déjà 42). `dvc commit -f` sur `generate_submission` et
+`feature_engineering` (dep `src/features` modifié par les fichiers de cette session), puis
+`dvc push`.
