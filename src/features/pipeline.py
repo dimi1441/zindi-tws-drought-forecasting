@@ -11,6 +11,7 @@ from src.features.horizon_features import add_horizon_features
 from src.features.io import build_cell_timeline, load_raw
 from src.features.mask_augmentation import apply_augmented_masking, select_gap_months
 from src.features.seasonal import add_climatology_features
+from src.features.spatial_neighborhood import add_spatial_neighborhood_features
 from src.features.target_month_encoding import add_target_month_encoding
 from src.features.temporal_lags import add_lag_features
 from src.features.trend import add_trend_features
@@ -26,6 +27,7 @@ def build_features(
     features_config: dict,
     masking_config: dict | None = None,
     rng=None,
+    gap_months: set | None = None,
 ) -> tuple[list, list, list]:
     """Construit les dataframes train/test enrichis et la liste des colonnes features légitimes.
 
@@ -34,11 +36,18 @@ def build_features(
     dynamique uniquement — voir `mask_augmentation.py`) avant de recalculer lags/climatologie/
     horizon. Rien n'est jamais mis en cache sur disque pour cette variante : chaque appel avec un
     `rng` différent doit être refait entièrement par l'appelant (Phase 4/5, pas encore écrite).
+
+    `gap_months` (ajouté le 2026-09-09, experts par horizon) : passe directement un ensemble de
+    mois-trous déjà déterminé (ex. rafales naturelles plafonnées ou prolongées, voir
+    `mask_augmentation.find_consecutive_streaks`/`extend_gap_streaks`) au lieu de le tirer via
+    `select_gap_months` -- prioritaire sur `masking_config`/`rng` si fourni.
     """
     train, test = load_raw(raw_dir)
     panel = build_cell_timeline(train, test)
 
-    if masking_config is not None:
+    if gap_months is not None:
+        panel = apply_augmented_masking(panel, gap_months)
+    elif masking_config is not None:
         if rng is None:
             raise ValueError(
                 "rng est requis quand masking_config est fourni (mode dynamique uniquement)."
@@ -53,6 +62,7 @@ def build_features(
     panel = add_trend_features(panel)
     panel = add_climatology_features(panel)
     panel = add_horizon_features(panel)
+    panel = add_spatial_neighborhood_features(panel)  # depend de add_horizon_features
     panel = add_target_month_encoding(panel)
 
     train_out = panel.loc[panel["is_train"]].drop(columns=["is_train"]).reset_index(drop=True)

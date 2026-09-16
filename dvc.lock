@@ -21,22 +21,22 @@ stages:
       size: 289126551
     - path: src/features
       hash: md5
-      md5: 6fcf8537ad2369de7ba9c7afb492ef43.dir
-      size: 44524
-      nfiles: 20
+      md5: ff2cc8c580258f6bebd97af62ef9b79b.dir
+      size: 57429
+      nfiles: 22
     outs:
     - path: configs/feature_columns.yaml
       hash: md5
-      md5: a74ae47f11977703f8694b580057c837
-      size: 770
+      md5: fae3faf3ff0880e0f0bbd8b84e683404
+      size: 1078
     - path: data/processed/test_features.parquet
       hash: md5
-      md5: efc37a20e03263c7416312af9b02c17a
-      size: 60469880
+      md5: a8e0ad686ddceb622a8a136c56208b35
+      size: 65820278
     - path: data/processed/train_features.parquet
       hash: md5
-      md5: bfff5787fca04f075f15a8b1532a8c04
-      size: 555119332
+      md5: 5be3589a57383c67089d5ba41eee259e
+      size: 625601360
   generate_submission:
     cmd: python -m src.generate_submission
     deps:
@@ -46,8 +46,8 @@ stages:
       size: 380
     - path: configs/feature_columns.yaml
       hash: md5
-      md5: a74ae47f11977703f8694b580057c837
-      size: 770
+      md5: fae3faf3ff0880e0f0bbd8b84e683404
+      size: 1078
     - path: configs/features.yaml
       hash: md5
       md5: e108130486310878898d5dd1b86f60a8
@@ -62,9 +62,9 @@ stages:
       size: 289126551
     - path: src/features
       hash: md5
-      md5: 6fcf8537ad2369de7ba9c7afb492ef43.dir
-      size: 44524
-      nfiles: 20
+      md5: ff2cc8c580258f6bebd97af62ef9b79b.dir
+      size: 57429
+      nfiles: 22
     - path: src/generate_submission.py
       hash: md5
       md5: 383f75ce5a94b1c8c5f9253c48060901
@@ -80,5 +80,5 @@ stages:
     outs:
     - path: submissions/submission.csv
       hash: md5
-      md5: 160583a3cf578a92cc4d5a8c2f19df2c
-      size: 7114872
+      md5: c9202d339827d24ac589c0aecf989e4b
+      size: 7114869

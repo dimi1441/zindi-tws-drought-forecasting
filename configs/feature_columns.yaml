@@ -35,5 +35,13 @@ feature_columns:
 - TWS_t_seasonal_anomaly
 - months_since_last_observed_tws
 - last_observed_tws
+- TWS_neighbor_N_last_observed
+- TWS_neighbor_N_months_since_last_observed
+- TWS_neighbor_S_last_observed
+- TWS_neighbor_S_months_since_last_observed
+- TWS_neighbor_E_last_observed
+- TWS_neighbor_E_months_since_last_observed
+- TWS_neighbor_W_last_observed
+- TWS_neighbor_W_months_since_last_observed
 - target_month_sin
 - target_month_cos

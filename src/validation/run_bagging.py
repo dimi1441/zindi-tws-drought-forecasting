@@ -1,13 +1,13 @@
 """Phase 5, bagging de GBR (demande utilisateur explicite du 2026-09-05, hors roadmap
-itération E qui parlait d'un ensemble de modèles génériques) : moyenne de 8 `make_gbr_pipeline()`
-(même hyperparamètres que le starter, cf. `baselines.py`), chacun entraîné sur un tirage de
-masquage augmenté différent (seeds 42..49 fixées explicitement pour la reproductibilité — N=8
-retenu le 2026-09-07 via `run_bagging_curve.py`, voir ce module pour la courbe MAE vs nombre de
-membres qui justifie ce choix). Pas de bootstrap des lignes en plus — la diversité vient des
-tirages de masque (mois de trous différents à chaque fois, mécanisme dynamique de la Phase 3) et,
-depuis le 2026-09-07, aussi du **taux** de trou lui-même : `RATE_MULTIPLIERS` fait varier la
-difficulté du masquage par membre (spread 0.5x-2x, demande utilisateur constatant que le train
-voyait ~10-16% de mois masqués contre 67% dans le vrai test).
+itération E qui parlait d'un ensemble de modèles génériques) : moyenne des `make_gbr_pipeline()`
+de production (même hyperparamètres que le starter, cf. `baselines.py`), chacun entraîné sur un
+tirage de masquage augmenté différent -- seeds/multiplicateurs importés de
+`generate_submission.py` (7 membres depuis le 2026-09-08, seed 42 exclu, cf. ce module pour le
+détail). Pas de bootstrap des lignes en plus — la diversité vient des tirages de masque (mois de
+trous différents à chaque fois, mécanisme dynamique de la Phase 3) et, depuis le 2026-09-07,
+aussi du **taux** de trou lui-même : `RATE_MULTIPLIERS` fait varier la difficulté du masquage par
+membre (spread 0.5x-2x, demande utilisateur constatant que le train voyait ~10-16% de mois
+masqués contre 67% dans le vrai test).
 
 Réutilise le même harnais que `run_baselines.py` (`temporal_splits`/`spatial_splits`, 5 folds
 chacun) pour rester directement comparable aux baselines déjà loggées (`full_features_gbr`,
@@ -27,22 +27,18 @@ import yaml
 from src.features.feature_columns import load_model_feature_columns
 from src.features.mask_augmentation import scale_gap_rate_by_period
 from src.features.pipeline import build_features
+from src.generate_submission import BAGGING_SEEDS, RATE_MULTIPLIERS
 from src.validation.baselines import fit_predict_bagged_gbr
 from src.validation.metrics import aggregate_fold_metrics, compute_metrics
 from src.validation.splits import spatial_splits, temporal_splits
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Seeds fixées explicitement (demande utilisateur) : 42 = même premier tirage que le reste du
-# projet (run_baselines.py, generate_submission.py), 43..49 = les 7 tirages supplémentaires pour
-# le bagging (N=8, cf. run_bagging_curve.py). Toute reprise de cette expérience avec ces mêmes
-# seeds doit reproduire les mêmes résultats (build_features est déterministe à rng fixé).
-BAGGING_SEEDS = [42, 43, 44, 45, 46, 47, 48, 49]
-
-# Multiplicateur du taux de trou par membre (demande utilisateur du 2026-09-07, voir
-# `generate_submission.py` pour le détail du raisonnement) : spread modéré 0.5x-2x, linéaire par
-# position dans BAGGING_SEEDS.
-RATE_MULTIPLIERS = np.linspace(0.5, 2.0, len(BAGGING_SEEDS))
+# BAGGING_SEEDS/RATE_MULTIPLIERS importés de generate_submission.py (source unique) --
+# corrigé le 2026-09-10 : ce module gardait sa propre copie (8 seeds), jamais mise à jour après
+# l'exclusion du seed 42 le 2026-09-08, ce qui a produit une comparaison invalide (un chiffre
+# rapporté comme "confirmation officielle du bag à 7 membres" venait en fait d'un ancien run à
+# 8 membres). Plus jamais deux listes à maintenir en synchro manuellement.
 
 SPLIT_SCHEMES = {
     "temporal": temporal_splits,

@@ -766,3 +766,180 @@ supprimé (son `BAGGING_SEEDS[1:]` aurait maintenant coupé le seed 43 au lieu d
 depuis que la production exclut déjà 42). `dvc commit -f` sur `generate_submission` et
 `feature_engineering` (dep `src/features` modifié par les fichiers de cette session), puis
 `dvc push`.
+
+## Phase 5 itération D : voisinage spatial (premier essai) — 2026-09-09
+
+Reprise de l'itération D (différée depuis la Phase 2, "levier majeur" du brief §4) après une
+discussion approfondie avec l'utilisateur sur comment l'implémenter correctement pour CE dataset
+précis, pas la proposition littérale du brief. Trois désaccords/corrections successifs avec la
+proposition initiale, tous par l'utilisateur ou déclenchés par une vérification directe des
+données :
+
+1. **Pas un carré fixe 3x3/5x5** (proposition du brief) : vérifié directement sur `Train.csv` --
+   grille irrégulière (140 latitudes espacées de 1°, mais 358 longitudes avec des trous ponctuels
+   à 3°) et sparse (15 715 cellules sur 50 120 possibles, 31% peuplé -- probablement terres
+   émergées seulement). Un décalage fixe en degrés manquerait souvent le vrai voisin, surtout
+   près des côtes. **Remplacé par** : le voisin direct = la cellule existante la plus proche dans
+   chaque direction cardinale (même longitude pour nord/sud, même latitude pour est/ouest) --
+   `build_direct_neighbor_lookup`, statique (ne dépend pas du temps).
+
+2. **Colonnes séparées par direction, pas une moyenne** (intuition utilisateur : l'eau ruisselle,
+   donc une direction peut être structurellement plus informative qu'une autre -- une moyenne
+   imposerait une symétrie a priori qui empêcherait un GBR/LightGBM de découvrir cette asymétrie
+   par lui-même).
+
+3. **Dernière valeur connue du voisin, jamais sa valeur brute à `t`** (correction utilisateur
+   déterminante) : le masquage réel est quasi-global par mois (Phase 1 -- chaque mois est masqué
+   à ~0% ou ~99,6-100% des cellules, jamais entre les deux, panne satellite mondiale). Donc quand
+   `TWS_t` d'une cellule est masqué (horizon>1, 66,5% du vrai test), son voisin l'est presque
+   certainement aussi, au même mois -- une feature "valeur brute du voisin à t" serait NaN pile
+   quand on en a besoin. Solution retenue : réutiliser `last_observed_tws`/
+   `months_since_last_observed_tws` (déjà calculés, causals, Phase 2) mais appliqués à la cellule
+   voisine plutôt qu'à soi-même -- même pendant une panne synchronisée, chaque voisin garde une
+   dernière valeur connue différente (info spatiale réelle), exploitable à tout horizon.
+
+**Implémentation** : nouveau module `src/features/spatial_neighborhood.py`
+(`build_direct_neighbor_lookup` + `add_spatial_neighborhood_features`), câblé dans `pipeline.py`
+juste après `add_horizon_features` (dépendance directe). 8 nouvelles colonnes :
+`TWS_neighbor_{N,S,E,W}_last_observed` et `TWS_neighbor_{N,S,E,W}_months_since_last_observed`.
+4 nouveaux tests (`test_spatial_neighborhood.py`) : lookup correct sur grille à trous, propagation
+de la dernière valeur (pas la valeur brute), et **causalité** (perturber le masquage d'un voisin à
+un mois tardif ne change rien aux lignes antérieures de la cellule qui l'observe -- même principe
+que les tests de causalité de l'ANN). 53 tests au total.
+
+**Coût mesuré** : pipeline complet (train+test réels) en ~124s, taux de NaN faible (1,2-2,6%
+selon la direction -- la plupart des cellules ont un voisin direct dans chaque direction).
+
+**Évaluation** (`src/validation/compare_spatial_neighborhood.py`) : comparaison CV temporelle 33
+vs 41 features (+ les 8 de voisinage) sur le bag de production actuel (7 membres, seeds 43-49) --
+même méthode que l'évaluation des features de tendance long terme (2026-09-07).
+
+**Résultat réel (5-fold CV temporel)** : MAE 0,3718 (sans) → 0,3713 (avec), gain de -0,0005
+(~-0,14%) mais **cohérent sur les 5 folds** (chaque fold s'améliore, aucun ne se dégrade) --
+signal réel, pas du bruit, mais bien plus petit que le "levier majeur" annoncé par le brief.
+Cohérent avec la limite structurelle anticipée : les voisins n'aident vraiment que sur horizon=1
+(33,5% du test), pas sur horizon>1 (66,5%, où le voisin est aussi masqué). **Décision : adopté en
+production** (rien à exclure, `EXCLUDED_FEATURE_COLUMNS` inchangé -- les 8 colonnes de voisinage
+n'y sont pas, donc incluses par défaut). `configs/feature_columns.yaml` régénéré (38→46 colonnes),
+`submission.csv` régénéré avec le bag à 7 membres + ces 41 features (cache par membre activé
+cette fois, modèles + prédictions sauvegardés dans `models/`/`reports/bag_member_predictions/`).
+
+**Diagnostic overfitting/underfitting demandé par l'utilisateur suite au gain faible** : mesuré
+directement l'écart MAE train vs validation par fold (jamais fait jusqu'ici dans ce projet) :
+
+| Fold | Train MAE | Val MAE | Écart |
+|---|---|---|---|
+| 1 | 0,3348 | 0,3570 | 0,022 |
+| 2 | 0,3352 | 0,3379 | 0,003 |
+| 3 | 0,3345 | 0,3431 | 0,009 |
+| 4 | 0,3349 | 0,3716 | 0,037 |
+| 5 | 0,3397 | 0,4176 | 0,078 |
+
+**Pas de l'overfitting classique** : le MAE train reste quasi constant (~0,335) malgré la fenêtre
+expansive (fold 5 a bien plus de données que fold 1, mais un train MAE comparable -- pas de signe
+de mémorisation croissante). L'écart se creuse spécifiquement aux folds 4-5, dont la fenêtre de
+validation tombe sur 2011+/2015 -- exactement les années où (a) les vraies pannes GRACE sont les
+plus fréquentes (Phase 1) et (b) notre masquage augmenté applique un taux délibérément plus élevé
+(35%/50% vs 5%, `configs/features.yaml`). **Conclusion : plafond de difficulté de la tâche sur ces
+folds, pas un problème d'ajustement du modèle** -- cohérent avec l'observation Phase 5 que
+LightGBM (modèle nettement plus capable) n'améliorait quasiment pas le MAE temporel non plus.
+Implication pour la suite : le réglage d'hyperparamètres a probablement peu de marge ; les vrais
+leviers restent des features qui survivent au manquant (climatologie du voisin plutôt que
+dernière valeur observée) ou une vraie source d'info externe (ERA5, itération F).
+
+## Idée d'experts par horizon (bagging spécialisé) — explorée puis mise de côté — 2026-09-09
+
+Discussion approfondie avec l'utilisateur : entraîner des membres spécialisés par horizon
+(nombre de trous consécutifs), routés à l'inférence selon l'horizon réel de la ligne de test
+(déterministe, pas un poids appris). Plusieurs itérations de raffinement :
+1. 7 membres experts (un par horizon 1-7) — écarté après calcul réel des volumes disponibles :
+   horizon=7 ne représente que 0,7% des lignes d'un tirage typique (~15 900 lignes), concentrées
+   sur un seul mois calendaire (une seule "saison" vue par ce membre).
+2. Raffinement boosting/cascade (M1 sur 100% des données, M2..M7 corrigent les résidus sur des
+   sous-ensembles progressivement plus durs) — répond au "je ne veux rien perdre".
+3. Simplifié par l'utilisateur à 2 modèles : Modèle A (masquage calibré sur les vraies
+   statistiques de rafales du train, plafonné à 3 mois) / Modèle B (mêmes emplacements de rafales,
+   prolongées à 4-7 mois selon la distribution du test), routage déterministe par horizon réel.
+
+**Vérification empirique clé, à la demande de l'utilisateur** : croisement horizon × mois cible
+réel dans le test (`data/processed/test_features.parquet`) — **les horizons 5, 6 et 7 du vrai
+test proviennent tous d'un seul et même événement** : la rafale de 6 mois consécutifs masqués
+2017-01→2017-06 (transition GRACE→GRACE-FO), produisant une progression continue d'horizon 2→7 à
+mesure qu'on avance dans cette rafale unique. Le train, lui, n'a jamais connu de rafale réelle
+>3 mois (10 rafales mesurées, toutes de 2 ou 3 mois, cf. entrée précédente).
+
+**Critique demandée par l'utilisateur avant tout code** — failles identifiées :
+1. Calibrer la distribution de Modèle B sur le test revient à ajuster un modèle sur un
+   échantillon de taille 1 (un seul événement historique).
+2. Une rafale artificiellement étirée n'est pas nécessairement équivalente statistiquement à la
+   vraie transition satellite (phénomènes physiques potentiellement différents).
+3. Modèle A, recalibré sur le taux *naturel* du train (moins de trous que la config actuelle,
+   déjà biaisée vers le régime du test depuis la Phase 3), risque de régresser sur la majorité du
+   test qu'il gère (horizon 1-3 = 72,4% des lignes réelles) pour un gain incertain sur les 27,6%
+   restants.
+4. **Point rédhibitoire** : le train n'ayant jamais de rafale réelle >3 mois, Modèle B ne peut
+   jamais être validé par CV contre une vraie ligne horizon>3 -- seulement du synthétique contre
+   du synthétique. Contrairement à toutes les décisions prises aujourd'hui (validées par CV avant
+   de soumettre), cette piste n'offre aucun garde-fou avant de dépenser une soumission Zindi réelle.
+5. Rupture artificielle au point de routage (horizon 3→4) sans justification physique.
+6. `months_since_last_observed_tws` est déjà une feature du modèle unique actuel -- un GBR peut
+   déjà conditionner ses prédictions dessus via ses splits, sans dupliquer l'architecture.
+
+**Décision : mise de côté** (pas abandonnée définitivement, mais pas la prochaine action) --
+alternative plus sûre suggérée si le signal horizon doit être exploité : pondérer plus fort les
+lignes horizon≥4 dans la fonction de perte d'un seul modèle unifié, qui reste validable par le CV
+existant, plutôt que diviser en deux pipelines.
+
+## Phase 6 : analyse d'erreur du modèle de production — jamais faite jusqu'ici — 2026-09-09/10
+
+Décidé de prioriser l'analyse d'erreur (§6 du brief, jamais réalisée) avant toute nouvelle
+architecture -- pour orienter les décisions par la donnée plutôt que par l'hypothèse, cohérent
+avec le pattern de toute la session (vérifier avant de construire). Nouveau
+`src/validation/error_analysis.py` : prédictions **hors-échantillon** (out-of-fold) des 5 folds
+temporels sur le modèle de production réel (bag à 7 membres, 41 features incluant le voisinage
+spatial) -- 1 795 014 lignes au total, ventilées par zone climatique, bande de latitude, saison,
+niveau de TWS, et horizon (ajouté au périmètre du brief, jugé indispensable vu les découvertes
+récentes). `lat` utilisée uniquement comme clé de regroupement post-hoc (jamais une feature,
+conforme au brief §3.2). Bug rencontré et corrigé en cours de route : `pd.cut` sans labels produit
+des `Interval` non sérialisables en parquet par pyarrow -- corrigé (`.astype(str)`) et code
+réordonné pour que l'affichage des résultats ne dépende plus de la sauvegarde finale.
+
+**Résultat le plus important, et le plus fiable statistiquement (échantillons ~359k par case)** :
+
+| Niveau de TWS | MAE | n |
+|---|---|---|
+| Très bas (sécheresse) | **0,498** | 359 003 |
+| Très haut (inondation) | 0,433 | 359 002 |
+| Bas | 0,319 | 359 003 |
+| Moyen | 0,304 | 359 002 |
+| Haut | 0,302 | 359 004 |
+
+Le modèle est ~1,6× moins bon sur les extrêmes (surtout la sécheresse) que sur les valeurs
+normales. Pour un challenge de **détection de sécheresse**, c'est le résultat le plus actionnable
+de toute la session : le modèle rate le plus précisément là où sa valeur pratique compte le plus.
+Matériel direct pour la section biais du rapport de confiance (§6.1).
+
+**Par zone climatique** : tropicale 0,390 (pire) > tempérée 0,373 > polaire 0,326 (meilleure).
+**Par bande de latitude** : pires bandes (-50,-30] à 0,409 et (50,70] à 0,400 ; meilleures (70,90]
+à 0,257 et (30,50] à 0,339 -- tropiques/subtropicaux des deux hémisphères systématiquement plus
+durs que les hautes latitudes. **Par saison** (ajustée par hémisphère) : été pire (0,406),
+printemps meilleur (0,350).
+
+**Par horizon** : confirme la tendance générale (1-2 ≈ 0,365, 3 ≈ 0,463) mais motif non monotone
+suspect (horizon 4 à 0,823, pire que horizon 5 à 0,462) et échantillons horizon 6/7/8 minuscules
+(32 à 43 lignes) -- probable confusion avec les folds tardifs (plus durs) ou le niveau de TWS
+extrême plutôt qu'un vrai effet horizon=4 isolé. Pas assez fiable pour agir dessus tel quel.
+
+Sauvegardé : `reports/error_analysis_by_{climate_zone,lat_band,season,tws_level,horizon}.csv` et
+`reports/error_analysis_oof_predictions.parquet` (1,79M lignes, prédictions + métadonnées
+complètes pour creuser plus tard).
+
+### Prochaine étape (2026-09-10)
+
+Pas encore décidé avec l'utilisateur : creuser le biais TWS-extrême (ex. pondération de la perte
+par niveau de TWS, ou un modèle/objectif quantile), clarifier la question ERA5 Final/ERA5T avec
+les organisateurs, ou la vérification d'hyperparamètres légère toujours en attente. Voisinage
+spatial (commit du 2026-09-09, `41 features`) toujours pas confirmé sur Zindi après régénération
+de `submission.csv` avec ce jeu de features -- upload à faire. Changements de cette session
+(`spatial_neighborhood.py`, `error_analysis.py`, refactor `pipeline.py`/`mask_augmentation.py`)
+pas encore committés.
