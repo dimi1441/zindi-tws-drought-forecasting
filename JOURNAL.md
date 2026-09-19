@@ -943,3 +943,26 @@ spatial (commit du 2026-09-09, `41 features`) toujours pas confirmé sur Zindi a
 de `submission.csv` avec ce jeu de features -- upload à faire. Changements de cette session
 (`spatial_neighborhood.py`, `error_analysis.py`, refactor `pipeline.py`/`mask_augmentation.py`)
 pas encore committés.
+
+## 2026-09-19 — Push GitHub/DVC en retard + trou de tracking MLflow
+
+- **Push GitHub/DVC oublié depuis plusieurs sessions** : la branche `main` locale était 17
+  commits en avance sur `origin/main` (rien poussé depuis un moment), et `dvc data status
+  --not-in-remote` montrait 3 fichiers jamais poussés vers le remote DVC local
+  (`train_features.parquet`, `test_features.parquet`, `submissions/submission.csv`). Commité
+  (`a459b65`, tout le travail non suivi : voisinage spatial, analyse d'erreur, recherche
+  d'hyperparamètres, importance par permutation), poussé sur les deux (`git push` + `dvc push`).
+- **MLflow non lancable** : `mlflow ui` plantait (500 sur `/`, `AttributeError: module 'anyio' has
+  no attribute 'from_thread'`). Cause : `anyio==4.15.0` (pinné dans `requirements.txt`, tiré par
+  `mlflow==3.15.2`) a changé son système de lazy-import et n'expose plus `from_thread` comme
+  attribut du module -- casse le shim WSGI déprécié de Starlette que le serveur UI de MLflow
+  utilise encore sous Windows. Fix : downgrade vers `anyio==4.11.0` (dernière version non yankée
+  qui expose encore l'attribut), repinné dans `requirements.txt`.
+- **Trou de tracking MLflow constaté par l'utilisateur** : `search_hyperparameters.py`,
+  `feature_importance.py` et `error_analysis.py` (écrits lors d'une session précédente, jamais
+  committés jusqu'à aujourd'hui) n'appelaient jamais `mlflow`, contrairement à la convention déjà
+  en place dans `run_baselines.py`/`run_bagging.py` (`mlflow.start_run` + `log_param`/
+  `log_metrics`/`log_artifact`). Corrigé dans les 3 scripts. Les runs déjà exécutés (résultats
+  déjà dans `reports/*.csv`, recalcul coûteux évité) ont été **rattrapés dans `mlflow.db`** via un
+  script ponctuel (non versionné) qui relit ces CSV et les logue comme des runs tagués
+  `backfilled=true` -- distinguables des futurs runs live si besoin de comparer la fidélité.

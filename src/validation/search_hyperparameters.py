@@ -17,6 +17,7 @@ Usage : `python -m src.validation.search_hyperparameters`
 
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pandas as pd
 import yaml
@@ -75,41 +76,55 @@ def main() -> None:
     feature_columns = load_model_feature_columns(PROJECT_ROOT / "configs")
     raw_dir = PROJECT_ROOT / base_config["paths"]["raw_dir"]
 
+    mlflow.set_tracking_uri(base_config["mlflow"]["tracking_uri"])
+    mlflow.set_experiment(base_config["mlflow"]["experiment_name"])
+
     print("construction du panel d'entrainement (seed=42, taux de base)...")
     rng = np.random.default_rng(MASKING_SEED)
     train_df, _, _ = build_features(raw_dir, features_config, masking_config, rng)
 
+    param_names = ["learning_rate", "max_iter", "max_depth", "min_samples_leaf", "l2_regularization"]
     results = []
     for name, params in CANDIDATES.items():
         print(f"\n=== {name} : {params} ===")
-        fold_rows = []
-        for fold_idx, (train_mask, val_mask) in enumerate(temporal_splits(train_df), start=1):
-            fit_df = train_df.loc[train_mask]
-            val_df = train_df.loc[val_mask]
-            model = _make_pipeline(*params)
-            X_fit = fit_df[feature_columns].to_numpy(dtype=np.float32)
-            y_fit = fit_df["target"].to_numpy(dtype=np.float32)
-            X_val = val_df[feature_columns].to_numpy(dtype=np.float32)
-            y_val = val_df["target"].to_numpy(dtype=np.float32)
-            model.fit(X_fit, y_fit)
-            metrics = compute_metrics(y_val, model.predict(X_val))
-            metrics["fold"] = fold_idx
-            fold_rows.append(metrics)
-            print(f"  fold {fold_idx}/5: mae={metrics['mae']:.4f}")
+        with mlflow.start_run(run_name=f"hp_search__{name}"):
+            mlflow.log_param("masking_seed", MASKING_SEED)
+            mlflow.log_params({"config": name, **dict(zip(param_names, params))})
 
-        aggregated = aggregate_fold_metrics(
-            [{"mae": r["mae"], "rmse": r["rmse"], "r2": r["r2"]} for r in fold_rows]
-        )
-        results.append({"config": name, **dict(zip(
-            ["learning_rate", "max_iter", "max_depth", "min_samples_leaf", "l2_regularization"], params
-        )), **aggregated})
-        print(f"{name} : MAE {aggregated['mae_mean']:.4f} +/- {aggregated['mae_std']:.4f}")
+            fold_rows = []
+            for fold_idx, (train_mask, val_mask) in enumerate(temporal_splits(train_df), start=1):
+                fit_df = train_df.loc[train_mask]
+                val_df = train_df.loc[val_mask]
+                model = _make_pipeline(*params)
+                X_fit = fit_df[feature_columns].to_numpy(dtype=np.float32)
+                y_fit = fit_df["target"].to_numpy(dtype=np.float32)
+                X_val = val_df[feature_columns].to_numpy(dtype=np.float32)
+                y_val = val_df["target"].to_numpy(dtype=np.float32)
+                model.fit(X_fit, y_fit)
+                metrics = compute_metrics(y_val, model.predict(X_val))
+                metrics["fold"] = fold_idx
+                fold_rows.append(metrics)
+                print(f"  fold {fold_idx}/5: mae={metrics['mae']:.4f}")
+
+            aggregated = aggregate_fold_metrics(
+                [{"mae": r["mae"], "rmse": r["rmse"], "r2": r["r2"]} for r in fold_rows]
+            )
+            mlflow.log_metrics(aggregated)
+            results.append({"config": name, **dict(zip(param_names, params)), **aggregated})
+            print(f"{name} : MAE {aggregated['mae_mean']:.4f} +/- {aggregated['mae_std']:.4f}")
 
     results_df = pd.DataFrame(results).sort_values("mae_mean")
     reports_dir = PROJECT_ROOT / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     out_path = reports_dir / "hyperparameter_search.csv"
     results_df.to_csv(out_path, index=False)
+
+    with mlflow.start_run(run_name="hp_search__summary"):
+        mlflow.log_param("masking_seed", MASKING_SEED)
+        mlflow.log_param("n_candidates", len(CANDIDATES))
+        mlflow.log_metric("best_mae_mean", results_df.iloc[0]["mae_mean"])
+        mlflow.log_param("best_config", results_df.iloc[0]["config"])
+        mlflow.log_artifact(str(out_path))
 
     print("\n" + results_df.to_string(index=False))
     print(f"\nSaved -> {out_path}")

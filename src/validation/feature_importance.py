@@ -11,6 +11,7 @@ Usage : `python -m src.validation.feature_importance`
 
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pandas as pd
 import yaml
@@ -33,50 +34,62 @@ def main() -> None:
     feature_columns = load_model_feature_columns(PROJECT_ROOT / "configs")
     raw_dir = PROJECT_ROOT / base_config["paths"]["raw_dir"]
 
+    mlflow.set_tracking_uri(base_config["mlflow"]["tracking_uri"])
+    mlflow.set_experiment(base_config["mlflow"]["experiment_name"])
+
     print("construction du panel d'entrainement (seed=42, taux de base)...")
     rng = np.random.default_rng(MASKING_SEED)
     train_df, _, _ = build_features(raw_dir, features_config, masking_config, rng)
 
-    importances_by_fold = []
-    for fold_idx, (train_mask, val_mask) in enumerate(temporal_splits(train_df), start=1):
-        fit_df = train_df.loc[train_mask]
-        val_df = train_df.loc[val_mask]
-        model = make_gbr_pipeline()
-        X_fit = fit_df[feature_columns].to_numpy(dtype=np.float32)
-        y_fit = fit_df["target"].to_numpy(dtype=np.float32)
-        X_val = val_df[feature_columns].to_numpy(dtype=np.float32)
-        y_val = val_df["target"].to_numpy(dtype=np.float32)
-        model.fit(X_fit, y_fit)
+    with mlflow.start_run(run_name="permutation_importance"):
+        mlflow.log_param("masking_seed", MASKING_SEED)
+        mlflow.log_param("n_repeats", N_REPEATS)
+        mlflow.log_param("n_features", len(feature_columns))
 
-        result = permutation_importance(
-            model,
-            X_val,
-            y_val,
-            scoring="neg_mean_absolute_error",
-            n_repeats=N_REPEATS,
-            random_state=42,
-            n_jobs=-1,
+        importances_by_fold = []
+        for fold_idx, (train_mask, val_mask) in enumerate(temporal_splits(train_df), start=1):
+            fit_df = train_df.loc[train_mask]
+            val_df = train_df.loc[val_mask]
+            model = make_gbr_pipeline()
+            X_fit = fit_df[feature_columns].to_numpy(dtype=np.float32)
+            y_fit = fit_df["target"].to_numpy(dtype=np.float32)
+            X_val = val_df[feature_columns].to_numpy(dtype=np.float32)
+            y_val = val_df["target"].to_numpy(dtype=np.float32)
+            model.fit(X_fit, y_fit)
+
+            result = permutation_importance(
+                model,
+                X_val,
+                y_val,
+                scoring="neg_mean_absolute_error",
+                n_repeats=N_REPEATS,
+                random_state=42,
+                n_jobs=-1,
+            )
+            # importances_mean est la baisse de neg_MAE -> une degradation du MAE positive.
+            importances_by_fold.append(result.importances_mean)
+            print(f"fold {fold_idx}/5 done")
+
+        importances = np.mean(importances_by_fold, axis=0)
+        summary = pd.DataFrame({"feature": feature_columns, "mae_degradation": importances}).sort_values(
+            "mae_degradation", ascending=False
         )
-        # importances_mean est la baisse de neg_MAE -> une degradation du MAE positive.
-        importances_by_fold.append(result.importances_mean)
-        print(f"fold {fold_idx}/5 done")
 
-    importances = np.mean(importances_by_fold, axis=0)
-    summary = pd.DataFrame({"feature": feature_columns, "mae_degradation": importances}).sort_values(
-        "mae_degradation", ascending=False
-    )
+        reports_dir = PROJECT_ROOT / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        out_path = reports_dir / "permutation_importance.csv"
+        summary.to_csv(out_path, index=False)
+        mlflow.log_artifact(str(out_path))
+        for feature, degradation in summary.head(10).itertuples(index=False):
+            mlflow.log_metric(f"mae_degradation__{feature}", degradation)
 
-    reports_dir = PROJECT_ROOT / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    out_path = reports_dir / "permutation_importance.csv"
-    summary.to_csv(out_path, index=False)
+        print("\n" + summary.to_string(index=False))
+        print(f"\nSaved -> {out_path}")
 
-    print("\n" + summary.to_string(index=False))
-    print(f"\nSaved -> {out_path}")
-
-    near_zero_or_negative = summary[summary["mae_degradation"] <= 0.0005]
-    print(f"\n{len(near_zero_or_negative)} features avec degradation <= 0.0005 (candidates a l'elagage) :")
-    print(near_zero_or_negative["feature"].tolist())
+        near_zero_or_negative = summary[summary["mae_degradation"] <= 0.0005]
+        mlflow.log_metric("n_prunable_features", len(near_zero_or_negative))
+        print(f"\n{len(near_zero_or_negative)} features avec degradation <= 0.0005 (candidates a l'elagage) :")
+        print(near_zero_or_negative["feature"].tolist())
 
 
 if __name__ == "__main__":

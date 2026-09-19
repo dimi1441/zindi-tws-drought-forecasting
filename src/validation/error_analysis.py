@@ -13,6 +13,7 @@ Usage : `python -m src.validation.error_analysis`
 
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pandas as pd
 import yaml
@@ -55,58 +56,69 @@ def main() -> None:
     feature_columns = load_model_feature_columns(PROJECT_ROOT / "configs")
     raw_dir = PROJECT_ROOT / base_config["paths"]["raw_dir"]
 
-    print("construction des panels d'entrainement (7 membres, seeds 43..49)...")
-    train_dfs = []
-    for seed, multiplier in zip(BAGGING_SEEDS, RATE_MULTIPLIERS):
-        rng = np.random.default_rng(seed)
-        scaled_periods = scale_gap_rate_by_period(base_gap_rate_by_period, multiplier)
-        masking_config = {"target_gap_rate_by_period": scaled_periods}
-        train_df, _, _ = build_features(raw_dir, features_config, masking_config, rng)
-        train_dfs.append(train_df)
+    mlflow.set_tracking_uri(base_config["mlflow"]["tracking_uri"])
+    mlflow.set_experiment(base_config["mlflow"]["experiment_name"])
 
-    oof_rows = []
-    for fold_idx, (train_mask, val_mask) in enumerate(temporal_splits(train_dfs[0]), start=1):
-        fit_dfs = [df.loc[train_mask] for df in train_dfs]
-        val_dfs = [df.loc[val_mask] for df in train_dfs]
-        y_pred = fit_predict_bagged_gbr(fit_dfs, val_dfs, feature_columns)
+    with mlflow.start_run(run_name="error_analysis_oof"):
+        mlflow.log_param("bagging_seeds", str(BAGGING_SEEDS))
+        mlflow.log_param("rate_multipliers", str(RATE_MULTIPLIERS))
 
-        val_meta = val_dfs[0][["lat", "lon", "time", "target", "months_since_last_observed_tws"]].copy()
-        val_meta["prediction"] = y_pred
-        val_meta["fold"] = fold_idx
-        oof_rows.append(val_meta)
-        print(f"fold {fold_idx}/5 done ({len(val_meta)} lignes hors-echantillon)")
+        print("construction des panels d'entrainement (7 membres, seeds 43..49)...")
+        train_dfs = []
+        for seed, multiplier in zip(BAGGING_SEEDS, RATE_MULTIPLIERS):
+            rng = np.random.default_rng(seed)
+            scaled_periods = scale_gap_rate_by_period(base_gap_rate_by_period, multiplier)
+            masking_config = {"target_gap_rate_by_period": scaled_periods}
+            train_df, _, _ = build_features(raw_dir, features_config, masking_config, rng)
+            train_dfs.append(train_df)
 
-    oof = pd.concat(oof_rows, ignore_index=True)
-    oof["abs_error"] = (oof["target"] - oof["prediction"]).abs()
-    oof["climate_zone"] = _climate_zone(oof["lat"])
-    oof["lat_band"] = pd.cut(oof["lat"], bins=range(-90, 91, 20)).astype(str)
-    oof["season"] = _local_season(oof["lat"], oof["time"].dt.month)
-    oof["tws_level"] = pd.qcut(oof["target"], q=5, labels=["tres_bas", "bas", "moyen", "haut", "tres_haut"])
-    oof["horizon"] = oof["months_since_last_observed_tws"].clip(upper=8)  # 8 = "8+"
+        oof_rows = []
+        for fold_idx, (train_mask, val_mask) in enumerate(temporal_splits(train_dfs[0]), start=1):
+            fit_dfs = [df.loc[train_mask] for df in train_dfs]
+            val_dfs = [df.loc[val_mask] for df in train_dfs]
+            y_pred = fit_predict_bagged_gbr(fit_dfs, val_dfs, feature_columns)
 
-    reports_dir = PROJECT_ROOT / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
+            val_meta = val_dfs[0][["lat", "lon", "time", "target", "months_since_last_observed_tws"]].copy()
+            val_meta["prediction"] = y_pred
+            val_meta["fold"] = fold_idx
+            oof_rows.append(val_meta)
+            print(f"fold {fold_idx}/5 done ({len(val_meta)} lignes hors-echantillon)")
 
-    print(f"\nTotal lignes hors-echantillon: {len(oof)}\n")
+        oof = pd.concat(oof_rows, ignore_index=True)
+        oof["abs_error"] = (oof["target"] - oof["prediction"]).abs()
+        oof["climate_zone"] = _climate_zone(oof["lat"])
+        oof["lat_band"] = pd.cut(oof["lat"], bins=range(-90, 91, 20)).astype(str)
+        oof["season"] = _local_season(oof["lat"], oof["time"].dt.month)
+        oof["tws_level"] = pd.qcut(oof["target"], q=5, labels=["tres_bas", "bas", "moyen", "haut", "tres_haut"])
+        oof["horizon"] = oof["months_since_last_observed_tws"].clip(upper=8)  # 8 = "8+"
 
-    for dim in ["climate_zone", "lat_band", "season", "tws_level", "horizon"]:
-        summary = (
-            oof.groupby(dim, observed=True)
-            .agg(mae=("abs_error", "mean"), n=("abs_error", "size"))
-            .sort_values("mae", ascending=False)
-        )
-        print(f"=== MAE par {dim} ===")
-        print(summary.to_string())
-        print()
-        summary.to_csv(reports_dir / f"error_analysis_by_{dim}.csv")
+        reports_dir = PROJECT_ROOT / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sauvegarde des predictions completes en dernier -- un echec ici (ex: type de colonne non
-    # serialisable) ne doit jamais faire perdre l'analyse deja affichee/sauvegardee ci-dessus.
-    try:
-        oof.to_parquet(reports_dir / "error_analysis_oof_predictions.parquet", index=False)
-        print(f"Predictions completes sauvegardees -> {reports_dir / 'error_analysis_oof_predictions.parquet'}")
-    except Exception as exc:
-        print(f"AVERTISSEMENT : echec de sauvegarde des predictions completes ({exc})")
+        print(f"\nTotal lignes hors-echantillon: {len(oof)}\n")
+        mlflow.log_metric("oof_rows", len(oof))
+        mlflow.log_metric("oof_mae_overall", oof["abs_error"].mean())
+
+        for dim in ["climate_zone", "lat_band", "season", "tws_level", "horizon"]:
+            summary = (
+                oof.groupby(dim, observed=True)
+                .agg(mae=("abs_error", "mean"), n=("abs_error", "size"))
+                .sort_values("mae", ascending=False)
+            )
+            print(f"=== MAE par {dim} ===")
+            print(summary.to_string())
+            print()
+            csv_path = reports_dir / f"error_analysis_by_{dim}.csv"
+            summary.to_csv(csv_path)
+            mlflow.log_artifact(str(csv_path))
+
+        # Sauvegarde des predictions completes en dernier -- un echec ici (ex: type de colonne non
+        # serialisable) ne doit jamais faire perdre l'analyse deja affichee/sauvegardee ci-dessus.
+        try:
+            oof.to_parquet(reports_dir / "error_analysis_oof_predictions.parquet", index=False)
+            print(f"Predictions completes sauvegardees -> {reports_dir / 'error_analysis_oof_predictions.parquet'}")
+        except Exception as exc:
+            print(f"AVERTISSEMENT : echec de sauvegarde des predictions completes ({exc})")
 
 
 if __name__ == "__main__":
